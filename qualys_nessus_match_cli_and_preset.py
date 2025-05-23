@@ -1,4 +1,4 @@
-
+'''
 import argparse
 import json
 import os
@@ -30,6 +30,8 @@ def parse_args():
     parser.add_argument("--config", help="Path to JSON config file")
     parser.add_argument("--output-dir", default="reports", help="Directory to save the output file")
     return parser.parse_args()
+'''
+
 
 #!/usr/bin/env python3
 
