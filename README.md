@@ -1,91 +1,48 @@
+# Qualys-Nessus Vulnerability Matcher
 
-# Qualys vs Nessus Vulnerability Matcher
+This script automates the process of generating a Qualys vulnerability report, downloading it, and comparing it against a Nessus vulnerability report (in Excel format). The result is an Excel file with match analysis including Unique ID, IP, Port, CVE, QID, Vulnerability Status, and Reported Finding.
 
-This script compares vulnerabilities between Nessus and Qualys scan results based on matching IP, Port, and CVE values.
+## Features
 
-## 🔧 Features
+- Authenticates to the Qualys API and launches or fetches a vulnerability scan report.
+- Downloads the report in CSV format and parses it correctly with all 44 expected columns.
+- Compares vulnerabilities based on IP, Port, and CVE from Nessus and Qualys reports.
+- Outputs results including:
+  - UniqueID from Nessus
+  - Reported Finding from Nessus
+  - CVE ID
+  - QID from Qualys
+  - IP and Port
+  - Vulnerability Status (renamed from "Vuln State")
+  - Match status (Match or No Match)
+- Saves results in an Excel file with three sheets:
+  - Match Summary
+  - Nessus Expanded (exploded by CVEs)
+  - Qualys Expanded (exploded by CVEs)
 
-- Automatic column detection based on common names (`IP`, `Port`, `CVEs`, etc.)
-- Fallback to user prompt if detection fails
-- CLI arguments for full control
-- JSON config file support for reusable mappings
-- Saves matched results in `reports/` folder
+## Usage
 
----
+1. Run the script.
+2. Enter Qualys credentials and Nessus file/sheet name.
+3. Choose whether to generate a new Qualys report or use an existing one.
+4. Provide Asset Group ID(s) or a host file for the report target.
+5. Wait while the report is generated/downloaded.
+6. Review the match results saved in `reports/nessus_vs_qualys_results.xlsx`.
 
-## 🖥️ Usage
+## Requirements
 
-### Basic
-```bash
-python qualys_nessus_match_cli_and_preset.py
-```
+- Python 3.7+
+- `pandas`
+- `openpyxl`
+- `requests`
 
-### With CLI Arguments
-```bash
-python qualys_nessus_match_cli_and_preset.py \
-  --nessus-file findings.xlsx \
-  --qualys-file findings.xlsx \
-  --nessus-sheet Master \
-  --qualys-sheet Qualys \
-  --output-dir reports/
-```
-
-### With Config File
-```bash
-python qualys_nessus_match_cli_and_preset.py --config config.json
-```
-
----
-
-## ⚙️ Sample `config.json`
-
-```json
-{
-  "nessus_file": "vulnerability_data.xlsx",
-  "qualys_file": "vulnerability_data.xlsx",
-  "nessus_sheet": "Master",
-  "qualys_sheet": "Qualys",
-  "columns": {
-    "nessus": {
-      "ip": "Host",
-      "port": "Port",
-      "cve": "CVE List"
-    },
-    "qualys": {
-      "ip": "IP Address",
-      "port": "Port Number",
-      "qid": "QID",
-      "cve": "CVEs",
-      "state": "Vuln State"
-    }
-  },
-  "output_dir": "reports"
-}
-```
-
----
-
-## 📦 Required Libraries
-
-Install the dependencies using:
+Install dependencies with:
 
 ```bash
-pip install pandas openpyxl
+pip install pandas openpyxl requests
 ```
 
----
+## Notes
 
-## 📁 Output
-
-- Saved as: `reports/nessus_vs_qualys_results.xlsx`
-- Contains:
-  - Match results
-  - Original Nessus and Qualys data
-
----
-
-## 📝 Notes
-
-- CVEs are exploded and matched one-by-one.
-- Only IP:Port:CVE triplets are considered for matches.
-- Use `--help` to see all CLI options.
+- Make sure the Nessus report is in `.xlsx` format and includes the necessary columns (`Unique ID`, `IP Address`, `Port`, `CVE`, `Reported Finding`).
+- The Qualys report should be generated using a template that includes QID, CVE ID, and Vulnerability Status fields.
