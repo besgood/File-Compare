@@ -1,66 +1,68 @@
-#!/usr/bin/env python3
-"""
-Unified script to:
-1. Launch and download a Qualys report.
-2. Cross-reference it with Nessus data.
-"""
-
 import os
 import time
-import pandas as pd
 import requests
 import xml.etree.ElementTree as ET
+import pandas as pd
+from datetime import datetime, timedelta
 from getpass import getpass
-from datetime import datetime
+from requests.auth import HTTPBasicAuth
 
-# === Qualys Report Downloader ===
-def download_qualys_report_interactive():
-    username = input("Qualys Username: ").strip()
-    password = getpass("Qualys Password: ").strip()
+# === Setup ===
+QUALYS_BASE_URL = "https://qualysapi.qualys.com"
+OUTPUT_FORMAT = "csv"
+HEADERS = {"X-Requested-With": "Python Script"}
+REPORTS_DIR = "reports"
+os.makedirs(REPORTS_DIR, exist_ok=True)
 
-    print("\nChoose input method:")
-    print("1. Asset Group ID(s)")
-    print("2. Host file (host.txt with IPs)")
+# === Credentials ===
+USERNAME = input("Qualys Username: ")
+PASSWORD = getpass("Qualys Password: ")
 
-    choice = input("Enter choice (1 or 2): ").strip()
-    asset_group_ids = []
-    ips = ""
+# === Nessus File ===
+nessus_file = input("Enter the Nessus Excel filename (with .xlsx): ")
+nessus_sheet = input("Enter the sheet name with Nessus findings: ")
 
-    if choice == "1":
-        asset_group_ids = input("Enter comma-separated Asset Group IDs: ").split(",")
-        use_ips = False
+# === Host Input ===
+def build_host_input():
+    option = input("Use asset group ID(s) (1) or host file (2)? Enter 1 or 2: ").strip()
+    if option == "1":
+        ag_ids = input("Enter one or more Asset Group IDs (comma-separated): ").strip()
+        return "asset_group_ids", ag_ids
+    elif option == "2":
+        host_file = input("Enter path to host file (one IP per line): ").strip()
+        with open(host_file, "r") as f:
+            ips = f.read().strip().replace("\n", ",").replace("\r", "")
+        return "ips", ips
     else:
-        with open("host.txt", "r") as f:
-            ips = ",".join([line.strip() for line in f if line.strip()])
-        use_ips = True
+        raise ValueError("Invalid input. Choose 1 or 2.")
 
+# === Launch Qualys Report ===
+def launch_report():
+    report_title = f"Qualys_Report_{int(time.time())}"
     template_id = input("Enter Report Template ID: ").strip()
-    report_title = f"PCI_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-    headers = {
-        "X-Requested-With": "Python script"
-    }
-    url = "https://qualysapi.qualys.com/api/2.0/fo/report/"
+    input_type, input_value = build_host_input()
 
     data = {
         "action": "launch",
+        "report_title": report_title,
         "report_type": "Scan",
         "template_id": template_id,
-        "output_format": "csv",
-        "report_title": report_title,
-        "ips": ips if use_ips else None,
-        "asset_group_ids": ",".join(asset_group_ids) if not use_ips else None
+        "output_format": OUTPUT_FORMAT,
+        input_type: input_value
     }
-    # Remove None values
-    data = {k: v for k, v in data.items() if v is not None}
 
-    print("Launching report...")
-    response = requests.post(url, headers=headers, data=data, auth=(username, password))
+    print("🚀 Launching report...")
+    response = requests.post(
+        f"{QUALYS_BASE_URL}/api/2.0/fo/report/",
+        data=data,
+        headers=HEADERS,
+        auth=HTTPBasicAuth(USERNAME, PASSWORD)
+    )
 
-    time.sleep(10)  # Wait for report ID generation
-
-    if response.status_code != 200:
-        raise Exception(f"Error launching report: {response.text}")
+    print("⏳ Waiting 10 seconds to allow Qualys to generate the report ID...")
+    wait_until = datetime.now() + timedelta(seconds=10)
+    print(f"🕒 Will try again at: {wait_until.strftime('%Y-%m-%d %H:%M:%S')}")
+    time.sleep(10)
 
     root = ET.fromstring(response.text)
     report_id = None
@@ -72,141 +74,118 @@ def download_qualys_report_interactive():
             break
 
     if not report_id:
-        raise Exception("Report ID not found in response.")
+        raise Exception(f"❌ Report ID not found in response:\n{response.text}")
 
-    print(f"Report launched with ID: {report_id}")
+    print(f"📄 Report launched with ID: {report_id}")
+    return report_id, report_title
 
-    # Wait for completion
-    status = ""
-    while status != "Finished":
-        time.sleep(600)  # 10 minutes
-        status_check = requests.get(
-            f"{url}?action=list&id={report_id}",
-            headers=headers,
-            auth=(username, password)
-        )
-        root = ET.fromstring(status_check.text)
-        state = root.find(".//STATE")
-        status = state.text if state is not None else ""
-        if status != "Finished":
-            print(f"Report status: {status} — Will try again at {datetime.now().strftime('%H:%M:%S')}")
+# === Check Report Status ===
+def check_report_status(report_id):
+    response = requests.get(
+        f"{QUALYS_BASE_URL}/api/2.0/fo/report/",
+        params={"action": "list", "id": report_id},
+        headers=HEADERS,
+        auth=HTTPBasicAuth(USERNAME, PASSWORD)
+    )
+    root = ET.fromstring(response.text)
+    state_elem = root.find(".//STATE")
+    if state_elem is not None:
+        return state_elem.text
+    else:
+        raise Exception(f"Could not determine status. Response:\n{response.text}")
 
-    print("Report is ready. Downloading...")
-
-    # Download report
-    download_url = f"{url}?action=fetch&id={report_id}"
-    download_response = requests.get(download_url, headers=headers, auth=(username, password))
-
-    if download_response.status_code != 200:
-        raise Exception("Failed to download report.")
-
-    os.makedirs("reports", exist_ok=True)
-    filename = f"reports/qualys_report_{report_id}.csv"
+# === Download Report ===
+def download_report(report_id, report_title):
+    response = requests.get(
+        f"{QUALYS_BASE_URL}/api/2.0/fo/report/",
+        params={"action": "fetch", "id": report_id},
+        headers=HEADERS,
+        auth=HTTPBasicAuth(USERNAME, PASSWORD)
+    )
+    filename = os.path.join(REPORTS_DIR, f"{report_title}.csv")
     with open(filename, "wb") as f:
-        f.write(download_response.content)
-
-    print(f"✅ Report saved to {filename}")
+        f.write(response.content)
+    print(f"✅ Report downloaded and saved as {filename}")
     return filename
 
+# === Match Nessus to Qualys ===
+def match_findings(nessus_path, sheet_name, qualys_path):
+    nessus = pd.read_excel(nessus_path, sheet_name=sheet_name)
+    qualys = pd.read_csv(qualys_path)
 
-# === Nessus vs Qualys Matcher ===
-def perform_matching(nessus_file, nessus_sheet, qualys_file):
-    nessus = pd.read_excel(nessus_file, sheet_name=nessus_sheet, header=0)
-    qualys = pd.read_csv(qualys_file)
+    # Try to identify required columns
+    nessus.columns = [str(c) for c in nessus.columns]
+    qualys.columns = [str(c) for c in qualys.columns]
 
-    # Auto-detect columns
-    nessus_ip_col = next((col for col in nessus.columns if "ip" in col.lower()), "IP")
-    nessus_port_col = next((col for col in nessus.columns if "port" in col.lower()), "Port")
-    nessus_cve_col = next((col for col in nessus.columns if "cve" in col.lower()), "CVEs")
+    nessus.rename(columns={
+        next(c for c in nessus.columns if "ip" in c.lower()): "IP",
+        next(c for c in nessus.columns if "port" in c.lower()): "Port",
+        next(c for c in nessus.columns if "cve" in c.lower()): "CVEs",
+        next(c for c in nessus.columns if "plugin" in c.lower() or "finding" in c.lower()): "Reported Finding",
+        next(c for c in nessus.columns if "id" in c.lower()): "uniqueID"
+    }, inplace=True)
 
-    qualys_ip_col = next((col for col in qualys.columns if "ip" in col.lower()), "IP")
-    qualys_port_col = next((col for col in qualys.columns if "port" in col.lower()), "Port")
-    qualys_qid_col = next((col for col in qualys.columns if "qid" in col.lower()), "QID")
-    qualys_cve_col = next((col for col in qualys.columns if "cve" in col.lower()), "CVEs")
-    qualys_state_col = next((col for col in qualys.columns if "vuln" in col.lower()), "Vuln State")
+    qualys.rename(columns={
+        next(c for c in qualys.columns if "ip" in c.lower()): "IP",
+        next(c for c in qualys.columns if "port" in c.lower()): "Port",
+        next(c for c in qualys.columns if "cve" in c.lower()): "CVEs",
+        next(c for c in qualys.columns if "qid" in c.lower()): "QID",
+        next(c for c in qualys.columns if "vuln" in c.lower()): "Vuln State"
+    }, inplace=True)
 
-    # Rename for consistency
-    nessus = nessus.rename(columns={
-        nessus_ip_col: "IP",
-        nessus_port_col: "Port",
-        nessus_cve_col: "CVEs"
-    })
-
-    qualys = qualys.rename(columns={
-        qualys_ip_col: "IP",
-        qualys_port_col: "Port",
-        qualys_qid_col: "QID",
-        qualys_cve_col: "CVEs",
-        qualys_state_col: "Vuln State"
-    })
-
-    nessus = nessus[["IP", "Port", "CVEs"]].dropna()
+    nessus = nessus[["uniqueID", "IP", "Port", "Reported Finding", "CVEs"]].dropna()
     qualys = qualys[["IP", "Port", "QID", "CVEs", "Vuln State"]].dropna()
 
     nessus["CVEs"] = nessus["CVEs"].astype(str).str.split(",")
     qualys["CVEs"] = qualys["CVEs"].astype(str).str.split(",")
+    nessus = nessus.explode("CVEs")
+    qualys = qualys.explode("CVEs")
+    nessus["CVEs"] = nessus["CVEs"].str.strip()
+    qualys["CVEs"] = qualys["CVEs"].str.strip()
 
-    nessus_exploded = nessus.explode("CVEs")
-    qualys_exploded = qualys.explode("CVEs")
+    nessus["key"] = nessus["IP"].astype(str) + ":" + nessus["Port"].astype(str) + ":" + nessus["CVEs"]
+    qualys["key"] = qualys["IP"].astype(str) + ":" + qualys["Port"].astype(str) + ":" + qualys["CVEs"]
 
-    nessus_exploded["CVEs"] = nessus_exploded["CVEs"].str.strip()
-    qualys_exploded["CVEs"] = qualys_exploded["CVEs"].str.strip()
+    qualys_keys = set(qualys["key"])
+    nessus["Match"] = nessus["key"].apply(lambda k: "Match" if k in qualys_keys else "No Match")
 
-    nessus_exploded["key"] = (
-        nessus_exploded["IP"].astype(str) + ":" +
-        nessus_exploded["Port"].astype(str) + ":" +
-        nessus_exploded["CVEs"]
+    results = (
+        nessus.merge(qualys[["key", "QID", "Vuln State"]], on="key", how="left")
+        .groupby(["uniqueID", "IP", "Port", "Reported Finding", "CVEs", "QID", "Vuln State"])
+        ["Match"].first().reset_index()
     )
 
-    qualys_exploded["key"] = (
-        qualys_exploded["IP"].astype(str) + ":" +
-        qualys_exploded["Port"].astype(str) + ":" +
-        qualys_exploded["CVEs"]
-    )
-
-    qualys_keys = set(qualys_exploded["key"])
-    nessus_exploded["Match"] = nessus_exploded["key"].apply(
-        lambda k: "Match" if k in qualys_keys else "No Match"
-    )
-
-    match_summary = (
-        nessus_exploded
-        .merge(qualys_exploded[["key", "QID", "Vuln State"]], on="key", how="left")
-        .groupby(["IP", "Port", "QID", "Vuln State"])["Match"]
-        .apply(lambda x: "Match" if "Match" in x.values else "No Match")
-        .reset_index()
-    )
-
-    nessus_result = pd.merge(
-        nessus.drop(columns=["CVEs"]),
-        match_summary,
-        on=["IP", "Port"],
-        how="left"
-    )
-
-    os.makedirs("reports", exist_ok=True)
-    output_path = "reports/nessus_vs_qualys_results.xlsx"
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        nessus_result.to_excel(writer, index=False, sheet_name="Nessus Match Results")
-        nessus.to_excel(writer, index=False, sheet_name="Master (Original)")
-        qualys.to_excel(writer, index=False, sheet_name="Qualys (Original)")
-
-    print(f"✅ Match results saved to: {output_path}")
-
+    output_path = os.path.join(REPORTS_DIR, "matched_results.xlsx")
+    results.to_excel(output_path, index=False)
+    print(f"✅ Match results saved to {output_path}")
 
 # === Main ===
 def main():
-    nessus_file = input("Enter path to Nessus findings Excel file: ").strip()
-    nessus_sheet = input("Enter sheet name containing Nessus findings: ").strip()
+    choice = input("Enter 1 to launch a new report or 2 to check/download existing report: ").strip()
+    if choice == "1":
+        report_id, report_title = launch_report()
+    elif choice == "2":
+        report_id = input("Enter existing Report ID: ").strip()
+        report_title = f"Qualys_Report_{report_id}"
+    else:
+        print("Invalid choice.")
+        return
 
-    qualys_report_path = download_qualys_report_interactive()
-
-    perform_matching(
-        nessus_file=nessus_file,
-        nessus_sheet=nessus_sheet,
-        qualys_file=qualys_report_path
-    )
-
+    while True:
+        try:
+            status = check_report_status(report_id)
+            print(f"📊 Report status: {status}")
+            if status.lower() == "finished":
+                qualys_csv = download_report(report_id, report_title)
+                match_findings(nessus_file, nessus_sheet, qualys_csv)
+                break
+            else:
+                next_try = datetime.now() + timedelta(minutes=10)
+                print(f"⏱ Waiting 10 minutes. Will try again at {next_try.strftime('%Y-%m-%d %H:%M:%S')}")
+                time.sleep(600)
+        except Exception as e:
+            print(f"⚠️ Error: {e}")
+            break
 
 if __name__ == "__main__":
     main()
