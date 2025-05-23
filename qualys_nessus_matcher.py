@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 
 import os
@@ -107,12 +106,11 @@ def match_findings(nessus_file, nessus_sheet, qualys_file):
     nessus.columns = [col.strip() for col in nessus.columns]
     qualys.columns = [col.strip() for col in qualys.columns]
 
-    # Auto match column names
     nessus = nessus.rename(columns={
         "IP Address": "IP", "Port": "Port", "CVE": "CVEs", "Unique ID": "UniqueID"
     })
     qualys = qualys.rename(columns={
-        "IP": "IP", "Port": "Port", "QID": "QID", "CVE ID": "CVEs", "Vulnerability State": "Vuln State"
+        "IP": "IP", "Port": "Port", "QID": "QID", "CVE ID": "CVEs", "Vulnerability State": "Vuln Status"
     })
 
     nessus["CVEs"] = nessus["CVEs"].astype(str).str.split(",")
@@ -131,8 +129,8 @@ def match_findings(nessus_file, nessus_sheet, qualys_file):
     nessus["Match"] = nessus["key"].apply(lambda k: "Match" if k in qualys_keys else "No Match")
 
     match_summary = (
-        nessus.merge(qualys[["key", "QID", "Vuln State"]], on="key", how="left")
-        .groupby(["UniqueID", "IP", "Port", "CVEs", "QID", "Vuln State"])
+        nessus.merge(qualys[["key", "QID", "Vuln Status"]], on="key", how="left")
+        .groupby(["UniqueID", "IP", "Port", "CVEs", "QID", "Vuln Status"])
         ["Match"].apply(lambda x: "Match" if "Match" in x.values else "No Match")
         .reset_index()
     )
