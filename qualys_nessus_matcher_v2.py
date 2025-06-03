@@ -123,11 +123,14 @@ def download_report(report_id, report_title):
 def write_dataframe_to_excel_chunks(writer, df, sheet_name, main_writer_status, current_file_index_ref, base_output_filename_no_ext, ext):
     """
     Writes a large DataFrame to one or more Excel files, chunked by MAX_ROWS_PER_FILE.
+    'writer' is the initial pandas ExcelWriter object.
+    'main_writer_status' is a dict {'closed': Boolean, 'path': String} tracking the initial writer.
+    'current_file_index_ref' is a list [int] to track part numbers across calls.
     """
     num_rows = len(df)
     if num_rows == 0:
         tqdm.write(f"Sheet '{sheet_name}' has no data. Attempting to write an empty sheet.")
-        if writer and not writer.closed and not main_writer_status['closed']:
+        if writer and not main_writer_status['closed']: # Relies on our managed status
             try:
                 pd.DataFrame().to_excel(writer, sheet_name=sheet_name, index=False)
                 tqdm.write(f"Empty sheet '{sheet_name}' written to: {main_writer_status['path']}")
@@ -140,14 +143,16 @@ def write_dataframe_to_excel_chunks(writer, df, sheet_name, main_writer_status, 
     first_chunk_df = df.iloc[:MAX_ROWS_PER_FILE]
     
     wrote_first_chunk_to_initial_writer = False
-    if writer and not writer.closed and not main_writer_status['closed']:
+    # Try to write the first chunk to the initial writer if our status says it's open
+    if writer and not main_writer_status['closed']:
         try:
             tqdm.write(f"Writing first chunk of '{sheet_name}' ({len(first_chunk_df)} rows) to: {main_writer_status['path']}")
             first_chunk_df.to_excel(writer, sheet_name=sheet_name, index=False)
             wrote_first_chunk_to_initial_writer = True
         except Exception as e:
             tqdm.write(f"Error writing first chunk of '{sheet_name}' to {main_writer_status['path']}: {e}. Will attempt new file.")
-            main_writer_status['closed'] = True # Mark as problematic
+            # If writing to main writer fails, ensure it's marked as closed for subsequent use by this function call
+            main_writer_status['closed'] = True 
 
     if not wrote_first_chunk_to_initial_writer:
         # Initial writer was not available/usable, or writing failed. Create a new file for the first chunk.
@@ -156,12 +161,14 @@ def write_dataframe_to_excel_chunks(writer, df, sheet_name, main_writer_status, 
         tqdm.write(f"Writing first chunk of '{sheet_name}' ({len(first_chunk_df)} rows) to new file: {output_filename_part}")
         with pd.ExcelWriter(output_filename_part, engine='openpyxl') as chunk_writer:
             first_chunk_df.to_excel(chunk_writer, sheet_name=sheet_name, index=False)
-        # If this was the first chunk, and the initial writer existed but wasn't used, close it.
-        if writer and not writer.closed and not main_writer_status['closed']:
+        
+        # If the initial writer existed but wasn't used for this first chunk (or failed),
+        # and our status still thought it was open, we should close it now.
+        if writer and not main_writer_status['closed']:
             tqdm.write(f"Closing initial writer {main_writer_status['path']} as '{sheet_name}' (or its first chunk) is moved to new files.")
             try:
                 writer.close()
-            except Exception as e: # Handles cases where writer might already be in a bad state
+            except Exception as e: 
                 tqdm.write(f"Note: Error closing initial writer (it might have been closed due to prior error): {e}")
             main_writer_status['closed'] = True
 
@@ -176,9 +183,9 @@ def write_dataframe_to_excel_chunks(writer, df, sheet_name, main_writer_status, 
         if chunk_df.empty:
             continue
 
-        # Ensure the initial writer is closed if it hasn't been already by this df's first chunk.
-        # This applies if the first chunk *did* fit in the initial writer.
-        if writer and not writer.closed and not main_writer_status['closed'] and wrote_first_chunk_to_initial_writer:
+        # If the first chunk went into the initial writer, and now we are making a new file for subsequent chunks,
+        # close the initial writer if our status says it's still open.
+        if writer and not main_writer_status['closed'] and wrote_first_chunk_to_initial_writer:
             tqdm.write(f"Closing initial writer {main_writer_status['path']} before creating new file for chunk {i+1} of '{sheet_name}'.")
             try:
                 writer.close()
@@ -198,8 +205,6 @@ def match_findings(nessus_file, nessus_sheet, qualys_file):
     print("🔄 Reading Nessus Excel file...")
     nessus = pd.read_excel(nessus_file, sheet_name=nessus_sheet)
     print("🔄 Reading Qualys CSV file...")
-    # Assuming Qualys CSV might have header rows to skip, as per original.
-    # If your Qualys CSV doesn't have exactly 4 header rows, adjust skiprows.
     try:
         qualys = pd.read_csv(qualys_file, skiprows=4, low_memory=False) 
     except pd.errors.EmptyDataError:
@@ -209,15 +214,13 @@ def match_findings(nessus_file, nessus_sheet, qualys_file):
         print(f"⚠️ Error reading Qualys file '{qualys_file}': {e}. Cannot proceed with matching.")
         return
 
-
     print("🔄 Cleaning column names...")
-    nessus.columns = [str(col).strip() for col in nessus.columns] # Ensure col names are strings
+    nessus.columns = [str(col).strip() for col in nessus.columns] 
     qualys.columns = [str(col).strip() for col in qualys.columns]
 
-    # Original renaming logic preserved
     print("🔄 Standardizing column names for Nessus...")
     nessus = nessus.rename(columns={
-        "Reported Finding": "Reported Finding", # Example, assuming it's already this
+        "Reported Finding": "Reported Finding", 
         "IP Address": "IP", "Port": "Port", "CVE": "CVEs", "Unique ID": "UniqueID"
     })
     print("🔄 Standardizing column names for Qualys...")
@@ -225,7 +228,6 @@ def match_findings(nessus_file, nessus_sheet, qualys_file):
         "IP": "IP", "Port": "Port", "QID": "QID", "CVE ID": "CVEs", "Vulnerability State": "Vuln Status"
     })
 
-    # Ensure essential columns exist after renaming
     required_nessus_cols = ["IP", "Port", "CVEs", "UniqueID", "Reported Finding"]
     required_qualys_cols = ["IP", "Port", "CVEs", "QID", "Vuln Status"]
 
@@ -236,13 +238,10 @@ def match_findings(nessus_file, nessus_sheet, qualys_file):
         if col not in qualys.columns:
             raise KeyError(f"Qualys DataFrame missing required column after rename: '{col}'. Available: {list(qualys.columns)}")
 
-
     print("🔄 Processing CVEs (splitting and exploding)...")
-    # Ensure 'CVEs' is string before splitting, handle NaNs by filling with empty string
     nessus["CVEs"] = nessus["CVEs"].fillna('').astype(str).str.split(",")
     qualys["CVEs"] = qualys["CVEs"].fillna('').astype(str).str.split(",")
 
-    # Explode can be memory intensive. Add prints.
     print("   Exploding Nessus CVEs...")
     nessus = nessus.explode("CVEs")
     print("   Exploding Qualys CVEs...")
@@ -257,81 +256,74 @@ def match_findings(nessus_file, nessus_sheet, qualys_file):
 
     qualys_keys = set(qualys["key"])
     print("🔄 Applying match logic to Nessus data...")
-    nessus["Match"] = nessus["key"].progress_apply(lambda k: "Match" if k in qualys_keys else "No Match") # tqdm progress_apply
+    nessus["Match"] = nessus["key"].progress_apply(lambda k: "Match" if k in qualys_keys else "No Match")
 
     print("🔄 Generating match summary...")
-    # This groupby().apply() can be slow, using progress_apply
     match_summary = (
         nessus.merge(qualys[["key", "QID", "Vuln Status"]], on="key", how="left")
-        .groupby(["UniqueID", "IP", "Port", "Reported Finding", "CVEs", "QID", "Vuln Status"], dropna=False) # dropna=False to keep NaNs in group keys
-        .progress_apply(lambda x: pd.Series({"Match": "Match" if "Match" in x["Match"].values else "No Match"})) # tqdm progress_apply
+        .groupby(["UniqueID", "IP", "Port", "Reported Finding", "CVEs", "QID", "Vuln Status"], dropna=False) 
+        .progress_apply(lambda x: pd.Series({"Match": "Match" if "Match" in x["Match"].values else "No Match"})) 
         .reset_index()
     )
     
-    # --- Excel Writing with Splitting ---
     out_path_base_name = "nessus_vs_qualys_results"
     out_path_base_dir = os.path.join(REPORTS_DIR, out_path_base_name)
     out_ext = ".xlsx"
 
-    file_part_counter = [0]  # Tracks part number for filenames. list for pass-by-reference.
-    initial_output_filename = f"{out_path_base_dir}{out_ext}" # Default first file name
+    file_part_counter = [0]  
+    initial_output_filename = f"{out_path_base_dir}{out_ext}" 
 
-    # Determine if the very first sheet to be written is large enough to warrant _part1 naming from start
     if not match_summary.empty and len(match_summary) > MAX_ROWS_PER_FILE:
         file_part_counter[0] = 1
         initial_output_filename = f"{out_path_base_dir}_part{file_part_counter[0]}{out_ext}"
         tqdm.write(f"First sheet ('Match Summary') is large. Initial output file will be: {initial_output_filename}")
     
     main_excel_writer = None
-    main_writer_status = {'closed': True, 'path': None}
+    main_writer_status = {'closed': True, 'path': None} # Start as closed, update when opened
 
     try:
         tqdm.write(f"Creating initial Excel file: {initial_output_filename}")
         main_excel_writer = pd.ExcelWriter(initial_output_filename, engine="openpyxl")
-        main_writer_status['closed'] = False
+        main_writer_status['closed'] = False # Mark as open
         main_writer_status['path'] = initial_output_filename
     except Exception as e:
         tqdm.write(f"Error creating initial Excel writer for {initial_output_filename}: {e}")
         print(f"📊 Match results could not be saved due to Excel writer error.")
-        return # Cannot proceed with writing
+        return 
 
     sheets_to_write_info = [
         ("Match Summary", match_summary),
-        ("Nessus Expanded", nessus), # This is the exploded 'nessus' DataFrame
-        ("Qualys Expanded", qualys)  # This is the exploded 'qualys' DataFrame
+        ("Nessus Expanded", nessus), 
+        ("Qualys Expanded", qualys)  
     ]
 
     tqdm.write("Writing data to Excel sheets...")
     for sheet_name, df_to_write in tqdm(sheets_to_write_info, desc="Processing sheets"):
-        current_writer_for_this_sheet = main_excel_writer if not main_writer_status['closed'] else None
+        current_writer_for_this_sheet = main_excel_writer # Pass the writer object
         
         write_dataframe_to_excel_chunks(
-            current_writer_for_this_sheet,
+            current_writer_for_this_sheet, # Pass the writer object
             df_to_write,
             sheet_name,
-            main_writer_status, # This will be updated if writer is closed
-            file_part_counter,  # This will be updated if new files are made
-            out_path_base_dir,  # Base name without _partX or extension
+            main_writer_status, 
+            file_part_counter,  
+            out_path_base_dir,  
             out_ext
         )
 
-    # Final close of the main writer if it's still open and wasn't closed by chunking
+    # Final close of the main writer if our status says it's still open
     if main_excel_writer and not main_writer_status['closed']:
+        tqdm.write(f"Closing the initial Excel file: {main_writer_status['path']}")
         try:
-            if hasattr(main_excel_writer, 'book') and main_excel_writer.book is not None and not main_excel_writer.book.closed: # openpyxl specific check
-                 tqdm.write(f"Closing the initial Excel file: {main_writer_status['path']}")
-                 main_excel_writer.close()
-            elif hasattr(main_excel_writer, 'closed') and not main_excel_writer.closed : # General check
-                 tqdm.write(f"Closing the initial Excel file: {main_writer_status['path']}")
-                 main_excel_writer.close()
-
+            main_excel_writer.close()
+            main_writer_status['closed'] = True # Explicitly mark as closed after successful close
         except Exception as e:
             tqdm.write(f"Error during final close of main Excel writer {main_writer_status['path']}: {e}")
-    elif main_excel_writer and main_writer_status['closed']:
-        tqdm.write(f"Initial Excel writer ({initial_output_filename}) was already closed or handled by chunking.")
+    elif main_excel_writer and main_writer_status['closed']: # If our status already says closed
+        tqdm.write(f"Initial Excel writer ({main_writer_status.get('path', 'N/A')}) was already considered closed or handled by chunking.")
 
     print(f"📊 Match results processing complete.")
-    if file_part_counter[0] == 0: # No "_partX" files were created beyond the initial one
+    if file_part_counter[0] == 0: 
         print(f"Output written to: {initial_output_filename}")
     else:
         print(f"Output potentially split into multiple files starting with '{out_path_base_name}'.")
@@ -349,7 +341,7 @@ def main():
             return
     elif mode == "2":
         report_id = input("Enter existing Report ID: ").strip()
-        report_title = f"Qualys_Report_{report_id}" # Consistent naming
+        report_title = f"Qualys_Report_{report_id}" 
     else:
         print("Invalid mode selected. Exiting.")
         return
@@ -366,21 +358,18 @@ def main():
             elif status.lower() == "error":
                 print(f"❌ Report ID {report_id} is in ERROR state. Cannot proceed.")
                 return
-            else: # Running, Submitted, etc.
-                wait_duration = 600  # 10 minutes
-                # Convert to int for tqdm if it's float from division
+            else: 
+                wait_duration = 600  
                 wait_duration_int = int(wait_duration) 
                 print(f"⏱ Report not finished. Will retry in {wait_duration_int // 60} minutes.")
-                # tqdm progress bar for the sleep duration
                 for _ in tqdm(range(wait_duration_int), desc="Waiting for Qualys report", unit="s", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]"):
                     time.sleep(1)
         except requests.exceptions.RequestException as e:
             print(f"Network or API error checking status: {e}. Retrying after a short delay...")
-            time.sleep(60) # Wait 60 seconds before retrying status check on network error
+            time.sleep(60) 
         except Exception as e:
             print(f"An unexpected error occurred: {e}. Exiting.")
             return
-
 
     match_findings(nessus_file, nessus_sheet, file_path)
 
