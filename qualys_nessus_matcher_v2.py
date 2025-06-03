@@ -207,6 +207,7 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         nessus_orig = pd.read_excel(nessus_file, sheet_name=nessus_sheet)
         print(f"🔄 Reading Qualys CSV file from: {qualys_csv_filepath}")
         try:
+            # --- USER CONFIRMED: skiprows=4 is correct for their Qualys CSV ---
             qualys_orig = pd.read_csv(qualys_csv_filepath, skiprows=4, low_memory=False) 
         except pd.errors.EmptyDataError:
             print(f"⚠️ Qualys file '{qualys_csv_filepath}' is empty or unreadable after skipping rows. Cannot proceed with matching.")
@@ -229,27 +230,53 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         nessus.columns = [str(col).strip() for col in nessus.columns] 
         qualys.columns = [str(col).strip() for col in qualys.columns]
 
+        # --- DIAGNOSTIC PRINT (NOW UNCOMMENTED BY DEFAULT) ---
+        print("\n--- Nessus DataFrame Head (after strip): ---")
+        print(nessus.head())
+        print("\n--- Qualys DataFrame Head (after strip): ---")
+        print(qualys.head())
+        print("\n--- Qualys DataFrame Columns (after strip): ---")
+        print(qualys.columns.tolist())
+        print("-" * 50)
+
         print("🔄 Standardizing column names for Nessus...")
+        # User confirmed Nessus headers: UniqueID, IP, Port, Reported Finding, CVE
         nessus = nessus.rename(columns={
-            "Reported Finding": "Reported Finding", 
-            "IP Address": "IP", "Port": "Port", "CVE": "CVEs", "Unique ID": "UniqueID"
+            # "Reported Finding": "Reported Finding", # Already correct if header is "Reported Finding"
+            # "IP Address": "IP", # User confirmed header is "IP"
+            # "Port": "Port", # Already correct
+            "CVE": "CVEs", # User confirmed header is "CVE"
+            # "Unique ID": "UniqueID" # Already correct
         })
         print("🔄 Standardizing column names for Qualys...")
+        # User confirmed Qualys headers: IP, Port, CVE ID, Vuln Status, QID
         qualys = qualys.rename(columns={
-            "IP": "IP", "Port": "Port", "QID": "QID", "CVE ID": "CVEs", "Vulnerability State": "Vuln Status"
+            # "IP": "IP", # Already correct
+            # "Port": "Port", # Already correct
+            # "QID": "QID", # Already correct
+            "CVE ID": "CVEs", # User confirmed header is "CVE ID"
+            # "Vulnerability State": "Vuln Status" # Already correct
         })
+
+        # --- DIAGNOSTIC PRINT (NOW UNCOMMENTED BY DEFAULT) ---
+        print("\n--- Nessus DataFrame Head (after rename): ---")
+        print(nessus.head())
+        print("\n--- Qualys DataFrame Head (after rename): ---")
+        print(qualys.head())
+        print("-" * 50)
+
 
         required_nessus_cols = ["IP", "Port", "CVEs", "UniqueID", "Reported Finding"]
         required_qualys_cols = ["IP", "Port", "CVEs", "QID", "Vuln Status"]
 
         for col in required_nessus_cols:
             if col not in nessus.columns:
-                original_name_map = {"IP": "IP Address", "CVEs": "CVE", "UniqueID": "Unique ID"}
+                original_name_map = {"IP": "IP", "CVEs": "CVE", "UniqueID": "UniqueID", "Port": "Port", "Reported Finding": "Reported Finding"}
                 expected_orig = original_name_map.get(col, "an expected original column")
                 raise KeyError(f"Nessus DataFrame missing required column '{col}' (expected from '{expected_orig}') after rename. Available: {list(nessus.columns)}")
         for col in required_qualys_cols:
             if col not in qualys.columns:
-                original_name_map = {"CVEs": "CVE ID", "Vuln Status": "Vulnerability State"}
+                original_name_map = {"IP": "IP", "Port": "Port", "CVEs": "CVE ID", "QID": "QID", "Vuln Status": "Vuln Status"}
                 expected_orig = original_name_map.get(col, "an expected original column")
                 raise KeyError(f"Qualys DataFrame missing required column '{col}' (expected from '{expected_orig}') after rename. Available: {list(qualys.columns)}. Check 'skiprows' value for Qualys CSV.")
 
@@ -257,10 +284,21 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         for df_name, df_obj in [("Nessus", nessus), ("Qualys", qualys)]:
             for col in ["IP", "Port", "CVEs"]:
                 if col in df_obj.columns:
-                    df_obj[col] = df_obj[col].fillna('').astype(str).str.strip() 
+                    df_obj[col] = df_obj[col].fillna('').astype(str).str.strip()
+                    # Optional: Convert CVEs to uppercase for consistent matching if case varies
+                    if col == "CVEs":
+                        df_obj[col] = df_obj[col].str.upper()
                 else:
                     print(f"⚠️ Warning: Column '{col}' not found in {df_name} DataFrame during normalization.")
         
+        # --- DIAGNOSTIC PRINT (NOW UNCOMMENTED BY DEFAULT) ---
+        print("\n--- Nessus Data (first 5, IP, Port, CVEs after normalization): ---")
+        if not nessus.empty: print(nessus[['IP', 'Port', 'CVEs']].head())
+        print("\n--- Qualys Data (first 5, IP, Port, CVEs after normalization): ---")
+        if not qualys.empty: print(qualys[['IP', 'Port', 'CVEs']].head())
+        print("-" * 50)
+
+
         print("🔄 Processing CVEs (splitting and exploding)...")
         nessus["CVEs"] = nessus["CVEs"].str.split(",")
         qualys["CVEs"] = qualys["CVEs"].str.split(",")
@@ -272,14 +310,27 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         qualys = qualys.explode("CVEs")
         gc.collect() 
 
-        nessus["CVEs"] = nessus["CVEs"].str.strip()
-        qualys["CVEs"] = qualys["CVEs"].str.strip()
+        nessus["CVEs"] = nessus["CVEs"].str.strip().str.upper() # Strip and uppercase after explode
+        qualys["CVEs"] = qualys["CVEs"].str.strip().str.upper() # Strip and uppercase after explode
         
         print("🔄 Creating merge keys...")
         nessus["key"] = nessus["IP"] + ":" + nessus["Port"] + ":" + nessus["CVEs"]
         qualys["key"] = qualys["IP"] + ":" + qualys["Port"] + ":" + qualys["CVEs"]
 
+        # --- DIAGNOSTIC PRINT (NOW UNCOMMENTED BY DEFAULT) ---
+        print("\n--- Sample Nessus Keys (first 10 after all processing): ---")
+        if not nessus.empty: print(nessus["key"].head(10).tolist())
+        print("\n--- Sample Qualys Keys (first 10 after all processing): ---")
+        if not qualys.empty: print(qualys["key"].head(10).tolist())
+        print("-" * 50)
+
         qualys_keys = set(qualys["key"])
+        # --- DIAGNOSTIC PRINT (NOW UNCOMMENTED BY DEFAULT) ---
+        print(f"\nNumber of unique Qualys keys: {len(qualys_keys)}")
+        if qualys_keys:
+            # Convert set to list for slicing, then print
+            print(f"First few Qualys keys in set: {list(qualys_keys)[:10]}")
+        print("-" * 50)
         
         print("🔄 Applying match logic to Nessus data...")
         nessus["Match"] = nessus["key"].progress_apply(lambda k: "Match" if k in qualys_keys else "No Match")
@@ -287,93 +338,33 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         match_counts_after_apply = nessus["Match"].value_counts()
         print("\n--- Match Counts in Nessus Data (after .progress_apply): ---")
         print(match_counts_after_apply)
-        if "Match" not in match_counts_after_apply or match_counts_after_apply.get("Match", 0) == 0: # Use .get for safety
-            print("⚠️ WARNING: Zero matches found after applying logic. Please check diagnostic prints if uncommented, and verify data consistency (IPs, Ports, CVEs) between Nessus and Qualys sources.")
+        if "Match" not in match_counts_after_apply or match_counts_after_apply.get("Match", 0) == 0: 
+            print("⚠️ WARNING: Zero matches found after applying logic. Please carefully review the printed sample keys and data transformations.")
         print("-" * 50)
 
         del qualys_keys 
         gc.collect()
 
         print("🔄 Generating match summary...")
-        # Preserve the 'key' from nessus through the merge for inclusion in the summary
         nessus_for_merge = nessus[["key", "UniqueID", "IP", "Port", "Reported Finding", "CVEs", "Match"]].copy()
-        qualys_for_merge = qualys[["key", "QID", "Vuln Status"]].drop_duplicates(subset=['key']).copy() # Avoid duplicate keys from Qualys if any
+        qualys_for_merge = qualys[["key", "QID", "Vuln Status"]].drop_duplicates(subset=['key']).copy() 
 
         merged_for_summary = nessus_for_merge.merge(qualys_for_merge, on="key", how="left")
-        del nessus_for_merge, qualys_for_merge # Free memory
+        del nessus_for_merge, qualys_for_merge 
         gc.collect()
-
-        # Group by fields, including the 'key' now.
-        # The lambda function for 'Match' status in groupby might be redundant if 'Match' column from nessus is already correct.
-        # Let's simplify the groupby and ensure 'key' is part of it or added back.
-        
-        # The 'Match' column is already determined in the 'nessus' DataFrame.
-        # We need to ensure the groupby operation correctly aggregates while keeping the 'key'.
-        # Since 'key' is unique for each IP:Port:CVE combination in the exploded Nessus data,
-        # and we are grouping by IP, Port, CVEs (components of the key), plus other fields,
-        # the 'key' will be consistent within each group. We can select it via .first() or just include it.
-
-        group_by_cols = ["UniqueID", "IP", "Port", "Reported Finding", "CVEs", "key", "QID", "Vuln Status"] # Added "key"
-        
-        # If 'Match' is already correctly determined per row in 'merged_for_summary' (from 'nessus'),
-        # the groupby is mainly for structuring and potentially handling cases where a Nessus finding
-        # might map to multiple Qualys QIDs if CVEs are not perfectly one-to-one (though less likely with current key).
-        # The original groupby's apply was to ensure 'Match' status if any part of a group matched.
-        # Given 'key' is now very specific, this might simplify.
-
-        # Let's keep the original groupby logic for 'Match' but ensure 'key' is a grouping column.
-        # The `progress_apply` for Match status should still work.
-        # The `key` is now part of the `groupby` columns.
-        
-        match_summary_grouped = merged_for_summary.groupby(
-            group_by_cols, # 'key' is now a grouping column
-            dropna=False
-        )
-        
-        # Apply the function to determine overall match status for the group
-        # This lambda was: lambda x: pd.Series({"Match": "Match" if "Match" in x["Match"].values else "No Match"})
-        # Since 'Match' is already in merged_for_summary, we can just take its first value for the group,
-        # as it should be consistent within the group defined by the unique key.
-        # Or, if there's a scenario where multiple rows from `merged_for_summary` form one group in `match_summary`
-        # (e.g., if UniqueID, ReportedFinding are less granular than IP:Port:CVE), then the original logic is safer.
-        # Given the group_by_cols, each group should have a consistent 'Match' status from the nessus part.
-        # So, we can just select the columns we need.
-        
-        # Simpler approach: select columns and drop duplicates if groupby isn't strictly for aggregation here.
-        # However, the original groupby was:
-        # .groupby(["UniqueID", "IP", "Port", "Reported Finding", "CVEs", "QID", "Vuln Status"], dropna=False)
-        # .progress_apply(lambda x: pd.Series({"Match": "Match" if "Match" in x["Match"].values else "No Match"}))
-        # Let's try to preserve this intent but include 'key'.
-        # The 'key' is made of IP, Port, CVEs. If these are in groupby, 'key' is implicitly handled.
-        # We just need to add 'key' to the output.
-        
-        # Reconstruct key in the summary if it's dropped by groupby
-        # Or, ensure 'key' is part of the group by and thus in the reset_index()
-        
-        # The 'key' column was in `nessus` and thus in `merged_for_summary`.
-        # If we group by its components (IP, Port, CVEs), the key is implicitly defined for each group.
-        # We want the key in the final output.
-        
-        # Let's adjust the groupby slightly to ensure 'key' is preserved or easily added.
-        # The original groupby was on UniqueID, IP, Port, Reported Finding, CVEs, QID, Vuln Status.
-        # The 'key' is IP:Port:CVEs. These are already grouping columns.
-        
-        # We'll add 'key' to the `merged_for_summary` columns that are carried to `match_summary`
         
         match_summary = (
             merged_for_summary.groupby(
-                ["UniqueID", "IP", "Port", "Reported Finding", "CVEs", "QID", "Vuln Status"], # Original groupby cols
+                ["UniqueID", "IP", "Port", "Reported Finding", "CVEs", "QID", "Vuln Status"], 
                 dropna=False
             )
             .agg(
-                Match_Status=('Match', 'first'), # Get the match status (should be consistent per group)
-                Match_Key=('key', 'first')      # Get the key for this group
+                Match_Status=('Match', 'first'), 
+                Match_Key=('key', 'first')      
             )
             .reset_index()
         )
-        # Rename Match_Status back to Match for consistency with original output
         match_summary.rename(columns={'Match_Status': 'Match', 'Match_Key': 'Key Used for Match'}, inplace=True)
-
 
         del merged_for_summary 
         gc.collect()
@@ -391,8 +382,6 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         print(f"❌ An unexpected error occurred during data processing: {e}")
         return
 
-
-    # --- Excel Writing with Splitting (Sequential) ---
     out_path_base_name = "nessus_vs_qualys_results"
     out_path_base_dir = os.path.join(REPORTS_DIR, out_path_base_name)
     out_ext = ".xlsx"
@@ -417,7 +406,6 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         print(f"📊 Match results could not be saved due to Excel writer error.")
         return 
 
-    # Only write Match Summary now
     tqdm.write("Writing 'Match Summary' to Excel...")
     write_dataframe_to_excel_chunks(
         main_excel_writer, match_summary, "Match Summary",
@@ -425,25 +413,6 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
     )
     del match_summary 
     gc.collect()
-
-    # --- Removed writing of Nessus Expanded and Qualys Expanded ---
-    # tqdm.write("Writing 'Nessus Expanded' to Excel...")
-    # current_writer_for_nessus = main_excel_writer if not main_writer_status['closed'] else None
-    # write_dataframe_to_excel_chunks(
-    #     current_writer_for_nessus, nessus, "Nessus Expanded",
-    #     main_writer_status, file_part_counter, out_path_base_dir, out_ext
-    # )
-    # del nessus 
-    # gc.collect()
-
-    # tqdm.write("Writing 'Qualys Expanded' to Excel...")
-    # current_writer_for_qualys = main_excel_writer if not main_writer_status['closed'] else None
-    # write_dataframe_to_excel_chunks(
-    #     current_writer_for_qualys, qualys, "Qualys Expanded",
-    #     main_writer_status, file_part_counter, out_path_base_dir, out_ext
-    # )
-    # del qualys 
-    # gc.collect()
 
     if main_excel_writer and not main_writer_status['closed']:
         tqdm.write(f"Closing the initial Excel file: {main_writer_status['path']}")
