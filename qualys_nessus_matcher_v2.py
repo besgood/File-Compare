@@ -255,37 +255,23 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         print("🔄 Standardizing column names for Qualys...")
         qualys = qualys.rename(columns={"CVE ID": "CVEs"})
         
-        # --- MODIFICATION: Attempt to extract port from Qualys "Results" if "Port" is missing ---
-        if "Port" not in qualys.columns: # If Port column doesn't exist at all
-            qualys["Port"] = pd.NA # Create it with NAs
+        if "Port" not in qualys.columns: 
+            qualys["Port"] = pd.NA 
         
-        # Ensure 'Results' column exists in Qualys for port extraction
         if "Results" in qualys.columns:
             print("🔄 Checking Qualys 'Port' column and attempting to extract from 'Results' if missing...")
-            # Identify rows where Port is NaN, empty string, '0', or '-' (common placeholders for no port)
-            # Convert Port to string first to handle mixed types before checking for empty strings or placeholders
             qualys["Port"] = qualys["Port"].fillna('').astype(str).str.strip()
-            missing_port_mask = qualys["Port"].isin(['', '0', '-']) | pd.isna(qualys["Port"]) # pd.isna for good measure
+            missing_port_mask = qualys["Port"].isin(['', '0', '-']) | pd.isna(qualys["Port"]) 
 
             if missing_port_mask.any():
                 print(f"   Found {missing_port_mask.sum()} Qualys rows with missing/placeholder Port. Attempting extraction from 'Results'.")
-                # Apply extraction function only to rows where port is missing
-                # .loc is important to ensure we are modifying the original DataFrame slice
                 qualys.loc[missing_port_mask, 'Port_from_Results'] = qualys.loc[missing_port_mask, 'Results'].apply(extract_port_from_results)
-                
-                # Update the 'Port' column with extracted ports where available
                 qualys.loc[missing_port_mask, 'Port'] = qualys.loc[missing_port_mask, 'Port_from_Results'].fillna(qualys.loc[missing_port_mask, 'Port'])
-                qualys.drop(columns=['Port_from_Results'], inplace=True, errors='ignore') # Clean up helper column
-                
-                # --- DIAGNOSTIC PRINT (Uncomment to see effect of port extraction) ---
-                # print("\n--- Qualys DataFrame Head (after port extraction attempt from Results): ---")
-                # print(qualys[['IP', 'Port', 'Results']].head(10)) # Show more rows to see variety
-                # print("-" * 50)
+                qualys.drop(columns=['Port_from_Results'], inplace=True, errors='ignore') 
             else:
                 print("   Qualys 'Port' column seems populated. No extraction from 'Results' needed based on initial check.")
         else:
             print("⚠️ Qualys DataFrame missing 'Results' column. Cannot attempt port extraction from it.")
-        # --- END OF PORT EXTRACTION MODIFICATION ---
 
 
         print("\n--- Nessus DataFrame Head (after rename): ---")
@@ -313,8 +299,24 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         for df_name, df_obj in [("Nessus", nessus), ("Qualys", qualys)]:
             for col in ["IP", "Port", "CVEs"]:
                 if col in df_obj.columns:
+                    # General conversion to string and stripping
                     df_obj[col] = df_obj[col].fillna('').astype(str).str.strip()
-                    if col == "CVEs": # Uppercase CVEs for consistency
+                    
+                    # Specific handling for Port to remove ".0"
+                    if col == "Port":
+                        def clean_port_str(port_str):
+                            if port_str.endswith(".0"):
+                                # Check if the part before ".0" is an integer
+                                try: 
+                                    int(port_str[:-2]) 
+                                    return port_str[:-2]
+                                except ValueError:
+                                    return port_str # Not a simple float string like "80.0"
+                            return port_str
+                        df_obj[col] = df_obj[col].apply(clean_port_str)
+                    
+                    # Uppercase CVEs for consistency
+                    if col == "CVEs": 
                         df_obj[col] = df_obj[col].str.upper()
                 else:
                     print(f"⚠️ Warning: Column '{col}' not found in {df_name} DataFrame during normalization.")
@@ -417,7 +419,7 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
     initial_output_filename = f"{out_path_base_dir}{out_ext}"
     if not match_summary.empty and len(match_summary) > MAX_ROWS_PER_FILE:
         file_part_counter[0] = 1 
-        initial_output_filename = f"{out_path_base_dir}_part{file_part_counter[0]}{out_ext}"
+        initial_output_filename = f"{out_path_base_dir}_part{current_file_index_ref[0]}{out_ext}" # Corrected variable name
         tqdm.write(f"First sheet ('Match Summary') is large. Initial output file will be: {initial_output_filename}")
 
     try:
