@@ -242,47 +242,69 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         nessus.columns = [str(col).strip() for col in nessus.columns] 
         qualys.columns = [str(col).strip() for col in qualys.columns]
 
-        print("\n--- Nessus DataFrame Head (after strip): ---")
-        print(nessus.head())
-        print("\n--- Qualys DataFrame Head (after strip): ---")
-        print(qualys.head())
-        print("\n--- Qualys DataFrame Columns (after strip): ---")
-        print(qualys.columns.tolist())
-        print("-" * 50)
+        # --- DIAGNOSTIC PRINT (Uncomment to use for detailed debugging) ---
+        # print("\n--- Nessus DataFrame Head (after strip): ---")
+        # print(nessus.head())
+        # print("\n--- Qualys DataFrame Head (after strip): ---")
+        # print(qualys.head())
+        # print("\n--- Qualys DataFrame Columns (after strip): ---")
+        # print(qualys.columns.tolist())
+        # print("-" * 50)
 
         print("🔄 Standardizing column names for Nessus...")
-        nessus = nessus.rename(columns={"CVE": "CVEs"})
+        nessus = nessus.rename(columns={"CVE": "CVEs"}) # Nessus: CVE -> CVEs
+        
         print("🔄 Standardizing column names for Qualys...")
-        qualys = qualys.rename(columns={"CVE ID": "CVEs"})
+        qualys_rename_map = {"CVE ID": "CVEs"} # Qualys: CVE ID -> CVEs
+        # Add Title and Results to rename map if they exist, prefixing them for clarity
+        if "Title" in qualys.columns:
+            qualys_rename_map["Title"] = "Qualys_Title"
+        else:
+            print("⚠️ Qualys data missing 'Title' column. It will be blank in the summary.")
+            qualys["Qualys_Title"] = "" # Create empty column if missing
+        
+        if "Results" in qualys.columns:
+            qualys_rename_map["Results"] = "Qualys_Results"
+        else:
+            print("⚠️ Qualys data missing 'Results' column. It will be blank in the summary.")
+            qualys["Qualys_Results"] = "" # Create empty column if missing
+        
+        qualys = qualys.rename(columns=qualys_rename_map)
         
         if "Port" not in qualys.columns: 
             qualys["Port"] = pd.NA 
         
-        if "Results" in qualys.columns:
-            print("🔄 Checking Qualys 'Port' column and attempting to extract from 'Results' if missing...")
+        # Use "Qualys_Results" for port extraction if "Results" was present
+        results_col_for_port_extraction = "Qualys_Results" if "Qualys_Results" in qualys.columns else None
+
+        if results_col_for_port_extraction:
+            print("🔄 Checking Qualys 'Port' column and attempting to extract from 'Qualys_Results' if missing...")
             qualys["Port"] = qualys["Port"].fillna('').astype(str).str.strip()
             missing_port_mask = qualys["Port"].isin(['', '0', '-']) | pd.isna(qualys["Port"]) 
 
             if missing_port_mask.any():
-                print(f"   Found {missing_port_mask.sum()} Qualys rows with missing/placeholder Port. Attempting extraction from 'Results'.")
-                qualys.loc[missing_port_mask, 'Port_from_Results'] = qualys.loc[missing_port_mask, 'Results'].apply(extract_port_from_results)
+                print(f"   Found {missing_port_mask.sum()} Qualys rows with missing/placeholder Port. Attempting extraction from 'Qualys_Results'.")
+                qualys.loc[missing_port_mask, 'Port_from_Results'] = qualys.loc[missing_port_mask, results_col_for_port_extraction].apply(extract_port_from_results)
                 qualys.loc[missing_port_mask, 'Port'] = qualys.loc[missing_port_mask, 'Port_from_Results'].fillna(qualys.loc[missing_port_mask, 'Port'])
                 qualys.drop(columns=['Port_from_Results'], inplace=True, errors='ignore') 
             else:
-                print("   Qualys 'Port' column seems populated. No extraction from 'Results' needed based on initial check.")
+                print("   Qualys 'Port' column seems populated. No extraction from 'Qualys_Results' needed based on initial check.")
         else:
-            print("⚠️ Qualys DataFrame missing 'Results' column. Cannot attempt port extraction from it.")
+            print("⚠️ Qualys DataFrame missing 'Qualys_Results' column (originally 'Results'). Cannot attempt port extraction from it.")
 
 
-        print("\n--- Nessus DataFrame Head (after rename): ---")
-        print(nessus.head())
-        print("\n--- Qualys DataFrame Head (after rename and potential port extraction): ---")
-        print(qualys.head())
-        print("-" * 50)
+        # --- DIAGNOSTIC PRINT (Uncomment to use for detailed debugging) ---
+        # print("\n--- Nessus DataFrame Head (after rename): ---")
+        # print(nessus.head())
+        # print("\n--- Qualys DataFrame Head (after rename and potential port extraction): ---")
+        # print(qualys.head())
+        # print("-" * 50)
 
 
         required_nessus_cols = ["IP", "Port", "CVEs", "UniqueID", "Reported Finding"]
-        required_qualys_cols = ["IP", "Port", "CVEs", "QID", "Vuln Status"]
+        # "Qualys_Title" and "Qualys_Results" are now guaranteed to exist (even if empty)
+        required_qualys_cols = ["IP", "Port", "CVEs", "QID", "Vuln Status", "Qualys_Title", "Qualys_Results"]
+
 
         for col in required_nessus_cols:
             if col not in nessus.columns:
@@ -291,41 +313,36 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
                 raise KeyError(f"Nessus DataFrame missing required column '{col}' (expected from '{expected_orig}') after rename. Available: {list(nessus.columns)}")
         for col in required_qualys_cols:
             if col not in qualys.columns:
-                original_name_map = {"IP": "IP", "Port": "Port", "CVEs": "CVE ID", "QID": "QID", "Vuln Status": "Vuln Status"}
+                original_name_map = {"IP": "IP", "Port": "Port", "CVEs": "CVE ID", "QID": "QID", "Vuln Status": "Vuln Status", "Qualys_Title": "Title", "Qualys_Results": "Results"}
                 expected_orig = original_name_map.get(col, "an expected original column")
                 raise KeyError(f"Qualys DataFrame missing required column '{col}' (expected from '{expected_orig}') after rename. Available: {list(qualys.columns)}. Check 'skiprows' value for Qualys CSV.")
 
         print("🔄 Normalizing data types and stripping whitespace for key components...")
         for df_name, df_obj in [("Nessus", nessus), ("Qualys", qualys)]:
-            for col in ["IP", "Port", "CVEs"]:
+            for col in ["IP", "Port", "CVEs"]: # Qualys_Title and Qualys_Results are handled separately if needed for key
                 if col in df_obj.columns:
-                    # General conversion to string and stripping
                     df_obj[col] = df_obj[col].fillna('').astype(str).str.strip()
-                    
-                    # Specific handling for Port to remove ".0"
                     if col == "Port":
                         def clean_port_str(port_str):
                             if port_str.endswith(".0"):
-                                # Check if the part before ".0" is an integer
                                 try: 
                                     int(port_str[:-2]) 
                                     return port_str[:-2]
                                 except ValueError:
-                                    return port_str # Not a simple float string like "80.0"
+                                    return port_str 
                             return port_str
                         df_obj[col] = df_obj[col].apply(clean_port_str)
-                    
-                    # Uppercase CVEs for consistency
                     if col == "CVEs": 
                         df_obj[col] = df_obj[col].str.upper()
                 else:
                     print(f"⚠️ Warning: Column '{col}' not found in {df_name} DataFrame during normalization.")
         
-        print("\n--- Nessus Data (first 5, IP, Port, CVEs after normalization): ---")
-        if not nessus.empty: print(nessus[['IP', 'Port', 'CVEs']].head())
-        print("\n--- Qualys Data (first 5, IP, Port, CVEs after normalization): ---")
-        if not qualys.empty: print(qualys[['IP', 'Port', 'CVEs']].head())
-        print("-" * 50)
+        # --- DIAGNOSTIC PRINT (Uncomment to use for detailed debugging) ---
+        # print("\n--- Nessus Data (first 5, IP, Port, CVEs after normalization): ---")
+        # if not nessus.empty: print(nessus[['IP', 'Port', 'CVEs']].head())
+        # print("\n--- Qualys Data (first 5, IP, Port, CVEs after normalization): ---")
+        # if not qualys.empty: print(qualys[['IP', 'Port', 'CVEs']].head())
+        # print("-" * 50)
 
 
         print("🔄 Processing CVEs (splitting and exploding)...")
@@ -346,17 +363,19 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         nessus["key"] = nessus["IP"] + ":" + nessus["Port"] + ":" + nessus["CVEs"]
         qualys["key"] = qualys["IP"] + ":" + qualys["Port"] + ":" + qualys["CVEs"]
 
-        print("\n--- Sample Nessus Keys (first 10 after all processing): ---")
-        if not nessus.empty: print(nessus["key"].head(10).tolist())
-        print("\n--- Sample Qualys Keys (first 10 after all processing): ---")
-        if not qualys.empty: print(qualys["key"].head(10).tolist())
-        print("-" * 50)
+        # --- DIAGNOSTIC PRINT (Uncomment to use for detailed debugging) ---
+        # print("\n--- Sample Nessus Keys (first 10 after all processing): ---")
+        # if not nessus.empty: print(nessus["key"].head(10).tolist())
+        # print("\n--- Sample Qualys Keys (first 10 after all processing): ---")
+        # if not qualys.empty: print(qualys["key"].head(10).tolist())
+        # print("-" * 50)
 
         qualys_keys = set(qualys["key"])
-        print(f"\nNumber of unique Qualys keys: {len(qualys_keys)}")
-        if qualys_keys:
-            print(f"First few Qualys keys in set: {list(qualys_keys)[:10]}")
-        print("-" * 50)
+        # --- DIAGNOSTIC PRINT (Uncomment to use for detailed debugging) ---
+        # print(f"\nNumber of unique Qualys keys: {len(qualys_keys)}")
+        # if qualys_keys:
+        #     print(f"First few Qualys keys in set: {list(qualys_keys)[:10]}")
+        # print("-" * 50)
         
         print("🔄 Applying match logic to Nessus data...")
         nessus["Match"] = nessus["key"].progress_apply(lambda k: "Match" if k in qualys_keys else "No Match")
@@ -373,7 +392,9 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
 
         print("🔄 Generating match summary...")
         nessus_for_merge = nessus[["key", "UniqueID", "IP", "Port", "Reported Finding", "CVEs", "Match"]].copy()
-        qualys_for_merge = qualys[["key", "QID", "Vuln Status"]].drop_duplicates(subset=['key']).copy() 
+        # Ensure Qualys_Title and Qualys_Results are included for the merge
+        qualys_cols_for_merge = ["key", "QID", "Vuln Status", "Qualys_Title", "Qualys_Results"]
+        qualys_for_merge = qualys[qualys_cols_for_merge].drop_duplicates(subset=['key']).copy() 
 
         merged_for_summary = nessus_for_merge.merge(qualys_for_merge, on="key", how="left")
         del nessus_for_merge, qualys_for_merge 
@@ -386,11 +407,19 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
             )
             .agg(
                 Match_Status=('Match', 'first'), 
-                Match_Key=('key', 'first')      
+                Match_Key=('key', 'first'),
+                Qualys_Title_Agg=('Qualys_Title', 'first'), # Aggregate Qualys_Title
+                Qualys_Results_Agg=('Qualys_Results', 'first') # Aggregate Qualys_Results
             )
             .reset_index()
         )
-        match_summary.rename(columns={'Match_Status': 'Match', 'Match_Key': 'Key Used for Match'}, inplace=True)
+        # Rename aggregated columns for final output
+        match_summary.rename(columns={
+            'Match_Status': 'Match', 
+            'Match_Key': 'Key Used for Match',
+            'Qualys_Title_Agg': 'Qualys Title',
+            'Qualys_Results_Agg': 'Qualys Results'
+            }, inplace=True)
 
         del merged_for_summary 
         gc.collect()
@@ -419,7 +448,8 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
     initial_output_filename = f"{out_path_base_dir}{out_ext}"
     if not match_summary.empty and len(match_summary) > MAX_ROWS_PER_FILE:
         file_part_counter[0] = 1 
-        initial_output_filename = f"{out_path_base_dir}_part{current_file_index_ref[0]}{out_ext}" # Corrected variable name
+        # Corrected variable name for part counter in filename
+        initial_output_filename = f"{out_path_base_dir}_part{file_part_counter[0]}{out_ext}" 
         tqdm.write(f"First sheet ('Match Summary') is large. Initial output file will be: {initial_output_filename}")
 
     try:
