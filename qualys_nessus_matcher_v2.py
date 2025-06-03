@@ -207,7 +207,7 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         nessus_orig = pd.read_excel(nessus_file, sheet_name=nessus_sheet)
         print(f"🔄 Reading Qualys CSV file from: {qualys_csv_filepath}")
         try:
-            qualys_orig = pd.read_csv(qualys_csv_filepath, skiprows=6, low_memory=False) 
+            qualys_orig = pd.read_csv(qualys_csv_filepath, skiprows=4, low_memory=False) 
         except pd.errors.EmptyDataError:
             print(f"⚠️ Qualys file '{qualys_csv_filepath}' is empty or unreadable after skipping rows. Cannot proceed with matching.")
             return
