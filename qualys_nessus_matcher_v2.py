@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from getpass import getpass
 from requests.auth import HTTPBasicAuth
 from tqdm.auto import tqdm # Added for progress bars
+import gc # Import garbage collector
 
 # Initialize tqdm for pandas
 tqdm.pandas()
@@ -16,7 +17,7 @@ tqdm.pandas()
 # === Constants ===
 QUALYS_BASE_URL = "https://qualysapi.qualys.com"
 REPORTS_DIR = "reports"
-OUTPUT_FORMAT = "csv"
+OUTPUT_FORMAT = "csv" # This is for the API download format
 HEADERS = {"X-Requested-With": "Python Script"}
 MAX_ROWS_PER_FILE = 1048500 # Max rows per Excel sheet/file (slightly less than actual max for safety)
 
@@ -24,11 +25,10 @@ MAX_ROWS_PER_FILE = 1048500 # Max rows per Excel sheet/file (slightly less than 
 # === Ensure reports directory exists ===
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
-# === Get credentials and Nessus file info ===
-username = input("Qualys Username: ")
-password = getpass("Qualys Password: ")
-nessus_file = input("Enter Nessus Excel filename: ").strip()
-nessus_sheet = input("Enter Nessus sheet name: ").strip()
+# === Global variables for credentials (will be set in main) ===
+qualys_username = None
+qualys_password = None
+
 
 # === Host input selection ===
 def build_host_input():
@@ -46,6 +46,15 @@ def build_host_input():
 
 # === Launch Qualys Report ===
 def launch_report():
+    # Access global credentials
+    global qualys_username, qualys_password
+    if not qualys_username or not qualys_password:
+        print("❌ Qualys credentials not set. Cannot launch report via API.")
+        # This case should ideally be handled before calling launch_report
+        # if API interaction is chosen.
+        raise Exception("Qualys credentials required for API interaction.")
+
+
     report_title = f"Qualys_Report_{int(time.time())}"
     template_id = input("Enter Qualys Report Template ID: ").strip()
     input_type, input_value = build_host_input()
@@ -55,7 +64,7 @@ def launch_report():
         "report_title": report_title,
         "report_type": "Scan",
         "template_id": template_id,
-        "output_format": OUTPUT_FORMAT,
+        "output_format": OUTPUT_FORMAT, # API download format
         input_type: input_value
     }
 
@@ -64,7 +73,7 @@ def launch_report():
         f"{QUALYS_BASE_URL}/api/2.0/fo/report/",
         data=data,
         headers=HEADERS,
-        auth=HTTPBasicAuth(username, password)
+        auth=HTTPBasicAuth(qualys_username, qualys_password)
     )
 
     print("⏳ Waiting 10 seconds for report ID to be available in API listing...")
@@ -91,11 +100,15 @@ def launch_report():
 
 # === Check Report Status ===
 def check_status(report_id):
+    global qualys_username, qualys_password
+    if not qualys_username or not qualys_password:
+        raise Exception("Qualys credentials required for API interaction.")
+
     response = requests.get(
         f"{QUALYS_BASE_URL}/api/2.0/fo/report/",
         params={"action": "list", "id": report_id},
         headers=HEADERS,
-        auth=HTTPBasicAuth(username, password)
+        auth=HTTPBasicAuth(qualys_username, qualys_password)
     )
     response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
     root = ET.fromstring(response.text)
@@ -104,16 +117,21 @@ def check_status(report_id):
 
 # === Download Report ===
 def download_report(report_id, report_title):
+    global qualys_username, qualys_password
+    if not qualys_username or not qualys_password:
+        raise Exception("Qualys credentials required for API interaction.")
+
     print(f"⬇️ Attempting to download report ID: {report_id}")
     response = requests.get(
         f"{QUALYS_BASE_URL}/api/2.0/fo/report/",
         params={"action": "fetch", "id": report_id},
         headers=HEADERS,
-        auth=HTTPBasicAuth(username, password)
+        auth=HTTPBasicAuth(qualys_username, qualys_password)
     )
     response.raise_for_status() # Ensure download was successful
     
-    filepath = os.path.join(REPORTS_DIR, f"{report_title}.{OUTPUT_FORMAT.lower()}") # Use OUTPUT_FORMAT for extension
+    # The API downloads in the format specified during launch (OUTPUT_FORMAT, which is 'csv')
+    filepath = os.path.join(REPORTS_DIR, f"{report_title}.{OUTPUT_FORMAT.lower()}")
     with open(filepath, "wb") as f:
         f.write(response.content)
     print(f"✅ Report downloaded to: {filepath}")
@@ -201,177 +219,260 @@ def write_dataframe_to_excel_chunks(writer, df, sheet_name, main_writer_status, 
 
 
 # === Match Nessus and Qualys Data ===
-def match_findings(nessus_file, nessus_sheet, qualys_file):
-    print("🔄 Reading Nessus Excel file...")
-    nessus = pd.read_excel(nessus_file, sheet_name=nessus_sheet)
-    print("🔄 Reading Qualys CSV file...")
+def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath): # Renamed qualys_file to qualys_csv_filepath for clarity
     try:
-        qualys = pd.read_csv(qualys_file, skiprows=4, low_memory=False) 
-    except pd.errors.EmptyDataError:
-        print(f"⚠️ Qualys file '{qualys_file}' is empty or unreadable after skipping rows. Cannot proceed with matching.")
+        print("🔄 Reading Nessus Excel file...")
+        nessus_orig = pd.read_excel(nessus_file, sheet_name=nessus_sheet)
+        print(f"🔄 Reading Qualys CSV file from: {qualys_csv_filepath}")
+        try:
+            # Qualys CSV from API download usually has 6 header rows before data, but original script used 4.
+            # Sticking to original skiprows=4. User might need to adjust if format changes.
+            qualys_orig = pd.read_csv(qualys_csv_filepath, skiprows=4, low_memory=False) 
+        except pd.errors.EmptyDataError:
+            print(f"⚠️ Qualys file '{qualys_csv_filepath}' is empty or unreadable after skipping rows. Cannot proceed with matching.")
+            return
+        except FileNotFoundError:
+            print(f"⚠️ Qualys file '{qualys_csv_filepath}' not found. Cannot proceed with matching.")
+            return
+        except Exception as e:
+            print(f"⚠️ Error reading Qualys file '{qualys_csv_filepath}': {e}. Cannot proceed with matching.")
+            return
+
+        # Make copies for processing to keep originals if needed (though not strictly used later)
+        nessus = nessus_orig.copy()
+        del nessus_orig # Free memory of original
+        gc.collect()
+        qualys = qualys_orig.copy()
+        del qualys_orig # Free memory of original
+        gc.collect()
+
+
+        print("🔄 Cleaning column names...")
+        nessus.columns = [str(col).strip() for col in nessus.columns] 
+        qualys.columns = [str(col).strip() for col in qualys.columns]
+
+        print("🔄 Standardizing column names for Nessus...")
+        nessus = nessus.rename(columns={
+            "Reported Finding": "Reported Finding", 
+            "IP Address": "IP", "Port": "Port", "CVE": "CVEs", "Unique ID": "UniqueID"
+        })
+        print("🔄 Standardizing column names for Qualys...")
+        qualys = qualys.rename(columns={
+            "IP": "IP", "Port": "Port", "QID": "QID", "CVE ID": "CVEs", "Vulnerability State": "Vuln Status"
+        })
+
+        required_nessus_cols = ["IP", "Port", "CVEs", "UniqueID", "Reported Finding"]
+        required_qualys_cols = ["IP", "Port", "CVEs", "QID", "Vuln Status"]
+
+        for col in required_nessus_cols:
+            if col not in nessus.columns:
+                raise KeyError(f"Nessus DataFrame missing required column after rename: '{col}'. Available: {list(nessus.columns)}")
+        for col in required_qualys_cols:
+            if col not in qualys.columns:
+                raise KeyError(f"Qualys DataFrame missing required column after rename: '{col}'. Available: {list(qualys.columns)}")
+
+        print("🔄 Processing CVEs (splitting and exploding)...")
+        nessus["CVEs"] = nessus["CVEs"].fillna('').astype(str).str.split(",")
+        qualys["CVEs"] = qualys["CVEs"].fillna('').astype(str).str.split(",")
+
+        print("   Exploding Nessus CVEs...")
+        nessus = nessus.explode("CVEs")
+        gc.collect() # Collect garbage after potentially large explode
+        print("   Exploding Qualys CVEs...")
+        qualys = qualys.explode("CVEs")
+        gc.collect() # Collect garbage
+
+        nessus["CVEs"] = nessus["CVEs"].str.strip()
+        qualys["CVEs"] = qualys["CVEs"].str.strip()
+
+        print("🔄 Creating merge keys...")
+        nessus["key"] = nessus["IP"].astype(str) + ":" + nessus["Port"].astype(str) + ":" + nessus["CVEs"].astype(str)
+        qualys["key"] = qualys["IP"].astype(str) + ":" + qualys["Port"].astype(str) + ":" + qualys["CVEs"].astype(str)
+
+        qualys_keys = set(qualys["key"])
+        
+        print("🔄 Applying match logic to Nessus data...")
+        nessus["Match"] = nessus["key"].progress_apply(lambda k: "Match" if k in qualys_keys else "No Match")
+        
+        del qualys_keys # Free memory from the set of keys
+        gc.collect()
+
+        print("🔄 Generating match summary...")
+        # The merge operation itself can be memory intensive
+        merged_for_summary = nessus.merge(qualys[["key", "QID", "Vuln Status"]], on="key", how="left")
+        gc.collect()
+
+        match_summary = (
+            merged_for_summary.groupby(["UniqueID", "IP", "Port", "Reported Finding", "CVEs", "QID", "Vuln Status"], dropna=False) 
+            .progress_apply(lambda x: pd.Series({"Match": "Match" if "Match" in x["Match"].values else "No Match"})) 
+            .reset_index()
+        )
+        del merged_for_summary # Free memory from intermediate merge
+        gc.collect()
+        
+    except MemoryError:
+        print("❌ Out of Memory Error occurred during data processing (explode, merge, or groupby).")
+        print("   Consider processing smaller files or increasing system memory.")
+        print("   If the error occurred during 'explode', the input files might have records with an extremely large number of CVEs.")
+        return # Exit function on MemoryError
+    except KeyError as e:
+        print(f"❌ KeyError during data processing: {e}. This often means an expected column name was not found.")
+        print(f"   Please check your input file column names and the script's renaming logic.")
         return
-    except Exception as e:
-        print(f"⚠️ Error reading Qualys file '{qualys_file}': {e}. Cannot proceed with matching.")
+    except Exception as e: # Catch any other unexpected error during processing
+        print(f"❌ An unexpected error occurred during data processing: {e}")
         return
 
-    print("🔄 Cleaning column names...")
-    nessus.columns = [str(col).strip() for col in nessus.columns] 
-    qualys.columns = [str(col).strip() for col in qualys.columns]
 
-    print("🔄 Standardizing column names for Nessus...")
-    nessus = nessus.rename(columns={
-        "Reported Finding": "Reported Finding", 
-        "IP Address": "IP", "Port": "Port", "CVE": "CVEs", "Unique ID": "UniqueID"
-    })
-    print("🔄 Standardizing column names for Qualys...")
-    qualys = qualys.rename(columns={
-        "IP": "IP", "Port": "Port", "QID": "QID", "CVE ID": "CVEs", "Vulnerability State": "Vuln Status"
-    })
-
-    required_nessus_cols = ["IP", "Port", "CVEs", "UniqueID", "Reported Finding"]
-    required_qualys_cols = ["IP", "Port", "CVEs", "QID", "Vuln Status"]
-
-    for col in required_nessus_cols:
-        if col not in nessus.columns:
-            raise KeyError(f"Nessus DataFrame missing required column after rename: '{col}'. Available: {list(nessus.columns)}")
-    for col in required_qualys_cols:
-        if col not in qualys.columns:
-            raise KeyError(f"Qualys DataFrame missing required column after rename: '{col}'. Available: {list(qualys.columns)}")
-
-    print("🔄 Processing CVEs (splitting and exploding)...")
-    nessus["CVEs"] = nessus["CVEs"].fillna('').astype(str).str.split(",")
-    qualys["CVEs"] = qualys["CVEs"].fillna('').astype(str).str.split(",")
-
-    print("   Exploding Nessus CVEs...")
-    nessus = nessus.explode("CVEs")
-    print("   Exploding Qualys CVEs...")
-    qualys = qualys.explode("CVEs")
-
-    nessus["CVEs"] = nessus["CVEs"].str.strip()
-    qualys["CVEs"] = qualys["CVEs"].str.strip()
-
-    print("🔄 Creating merge keys...")
-    nessus["key"] = nessus["IP"].astype(str) + ":" + nessus["Port"].astype(str) + ":" + nessus["CVEs"].astype(str)
-    qualys["key"] = qualys["IP"].astype(str) + ":" + qualys["Port"].astype(str) + ":" + qualys["CVEs"].astype(str)
-
-    qualys_keys = set(qualys["key"])
-    print("🔄 Applying match logic to Nessus data...")
-    nessus["Match"] = nessus["key"].progress_apply(lambda k: "Match" if k in qualys_keys else "No Match")
-
-    print("🔄 Generating match summary...")
-    match_summary = (
-        nessus.merge(qualys[["key", "QID", "Vuln Status"]], on="key", how="left")
-        .groupby(["UniqueID", "IP", "Port", "Reported Finding", "CVEs", "QID", "Vuln Status"], dropna=False) 
-        .progress_apply(lambda x: pd.Series({"Match": "Match" if "Match" in x["Match"].values else "No Match"})) 
-        .reset_index()
-    )
-    
+    # --- Excel Writing with Splitting (Sequential) ---
     out_path_base_name = "nessus_vs_qualys_results"
     out_path_base_dir = os.path.join(REPORTS_DIR, out_path_base_name)
     out_ext = ".xlsx"
 
     file_part_counter = [0]  
-    initial_output_filename = f"{out_path_base_dir}{out_ext}" 
-
+    main_excel_writer = None
+    main_writer_status = {'closed': True, 'path': None} 
+    
+    # Determine initial filename based on the first sheet to be written (match_summary)
+    initial_output_filename = f"{out_path_base_dir}{out_ext}"
     if not match_summary.empty and len(match_summary) > MAX_ROWS_PER_FILE:
-        file_part_counter[0] = 1
+        file_part_counter[0] = 1 # Start part numbering if first sheet is large
         initial_output_filename = f"{out_path_base_dir}_part{file_part_counter[0]}{out_ext}"
         tqdm.write(f"First sheet ('Match Summary') is large. Initial output file will be: {initial_output_filename}")
-    
-    main_excel_writer = None
-    main_writer_status = {'closed': True, 'path': None} # Start as closed, update when opened
 
     try:
         tqdm.write(f"Creating initial Excel file: {initial_output_filename}")
         main_excel_writer = pd.ExcelWriter(initial_output_filename, engine="openpyxl")
-        main_writer_status['closed'] = False # Mark as open
+        main_writer_status['closed'] = False 
         main_writer_status['path'] = initial_output_filename
     except Exception as e:
         tqdm.write(f"Error creating initial Excel writer for {initial_output_filename}: {e}")
         print(f"📊 Match results could not be saved due to Excel writer error.")
         return 
 
-    sheets_to_write_info = [
-        ("Match Summary", match_summary),
-        ("Nessus Expanded", nessus), 
-        ("Qualys Expanded", qualys)  
-    ]
+    # Write Match Summary
+    tqdm.write("Writing 'Match Summary' to Excel...")
+    write_dataframe_to_excel_chunks(
+        main_excel_writer, match_summary, "Match Summary",
+        main_writer_status, file_part_counter, out_path_base_dir, out_ext
+    )
+    del match_summary # Free memory
+    gc.collect()
 
-    tqdm.write("Writing data to Excel sheets...")
-    for sheet_name, df_to_write in tqdm(sheets_to_write_info, desc="Processing sheets"):
-        current_writer_for_this_sheet = main_excel_writer # Pass the writer object
-        
-        write_dataframe_to_excel_chunks(
-            current_writer_for_this_sheet, # Pass the writer object
-            df_to_write,
-            sheet_name,
-            main_writer_status, 
-            file_part_counter,  
-            out_path_base_dir,  
-            out_ext
-        )
+    # Write Nessus Expanded
+    tqdm.write("Writing 'Nessus Expanded' to Excel...")
+    current_writer_for_nessus = main_excel_writer if not main_writer_status['closed'] else None
+    write_dataframe_to_excel_chunks(
+        current_writer_for_nessus, nessus, "Nessus Expanded",
+        main_writer_status, file_part_counter, out_path_base_dir, out_ext
+    )
+    del nessus # Free memory
+    gc.collect()
+
+    # Write Qualys Expanded
+    tqdm.write("Writing 'Qualys Expanded' to Excel...")
+    current_writer_for_qualys = main_excel_writer if not main_writer_status['closed'] else None
+    write_dataframe_to_excel_chunks(
+        current_writer_for_qualys, qualys, "Qualys Expanded",
+        main_writer_status, file_part_counter, out_path_base_dir, out_ext
+    )
+    del qualys # Free memory
+    gc.collect()
 
     # Final close of the main writer if our status says it's still open
     if main_excel_writer and not main_writer_status['closed']:
         tqdm.write(f"Closing the initial Excel file: {main_writer_status['path']}")
         try:
             main_excel_writer.close()
-            main_writer_status['closed'] = True # Explicitly mark as closed after successful close
+            main_writer_status['closed'] = True 
         except Exception as e:
             tqdm.write(f"Error during final close of main Excel writer {main_writer_status['path']}: {e}")
-    elif main_excel_writer and main_writer_status['closed']: # If our status already says closed
+    elif main_excel_writer and main_writer_status['closed']: 
         tqdm.write(f"Initial Excel writer ({main_writer_status.get('path', 'N/A')}) was already considered closed or handled by chunking.")
 
     print(f"📊 Match results processing complete.")
     if file_part_counter[0] == 0: 
+        print(f"Output written to: {initial_output_filename}") 
+    elif file_part_counter[0] == 1 and initial_output_filename.endswith(f"_part1{out_ext}"):
         print(f"Output written to: {initial_output_filename}")
     else:
         print(f"Output potentially split into multiple files starting with '{out_path_base_name}'.")
-        print(f"Check files from '{out_path_base_name}{out_ext}' or '{out_path_base_name}_part1{out_ext}' up to '_part{file_part_counter[0]}{out_ext}'.")
+        print(f"Check files from '{out_path_base_dir}{out_ext}' (if first sheet was small) or '{out_path_base_dir}_part1{out_ext}' up to '_part{file_part_counter[0]}{out_ext}'.")
 
 
 # === Main Script ===
 def main():
-    mode = input("1 = New Report, 2 = Use Existing Report ID: ").strip()
-    if mode == "1":
-        try:
-            report_id, report_title = launch_report()
-        except Exception as e:
-            print(f"❌ Error launching report: {e}")
+    # Access global credentials to set them
+    global qualys_username, qualys_password
+
+    qualys_report_filepath = None # Will store the path to the Qualys CSV report
+
+    # === Get Nessus file info first (as it's always needed) ===
+    # Moved Nessus input here as it's independent of Qualys source
+    nessus_file_path_input = input("Enter Nessus Excel filename: ").strip()
+    nessus_sheet_name_input = input("Enter Nessus sheet name: ").strip()
+
+
+    # === New prompt for Qualys report source ===
+    has_downloaded_qualys = input("Have you already downloaded the Qualys report as a CSV? (yes/no): ").strip().lower()
+
+    if has_downloaded_qualys == 'yes':
+        qualys_report_filepath = input("Enter the full path to your downloaded Qualys CSV report: ").strip()
+        if not os.path.exists(qualys_report_filepath):
+            print(f"❌ Error: Provided Qualys report file '{qualys_report_filepath}' not found. Exiting.")
             return
-    elif mode == "2":
-        report_id = input("Enter existing Report ID: ").strip()
-        report_title = f"Qualys_Report_{report_id}" 
+        print(f"👍 Using existing Qualys report: {qualys_report_filepath}")
     else:
-        print("Invalid mode selected. Exiting.")
+        print("ℹ️ Will proceed to fetch Qualys report via API.")
+        # Get Qualys credentials only if using API
+        qualys_username = input("Qualys Username: ")
+        qualys_password = getpass("Qualys Password: ")
+
+        mode = input("1 = Launch New Qualys Report via API, 2 = Use Existing Report ID via API: ").strip()
+        if mode == "1":
+            try:
+                report_id, report_title = launch_report()
+            except Exception as e:
+                print(f"❌ Error launching report: {e}")
+                return
+        elif mode == "2":
+            report_id = input("Enter existing Qualys Report ID: ").strip()
+            report_title = f"Qualys_Report_{report_id}" 
+        else:
+            print("Invalid mode selected for API interaction. Exiting.")
+            return
+
+        print(f"📋 Using Qualys Report ID: {report_id}, Title: {report_title} (via API)")
+
+        while True:
+            try:
+                status = check_status(report_id)
+                print(f"🔄 Report status for ID {report_id}: {status}")
+                if status.lower() == "finished":
+                    qualys_report_filepath = download_report(report_id, report_title)
+                    break
+                elif status.lower() == "error":
+                    print(f"❌ Report ID {report_id} is in ERROR state. Cannot proceed.")
+                    return
+                else: 
+                    wait_duration = 600  
+                    wait_duration_int = int(wait_duration) 
+                    print(f"⏱ Report not finished. Will retry in {wait_duration_int // 60} minutes.")
+                    for _ in tqdm(range(wait_duration_int), desc="Waiting for Qualys report", unit="s", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]"):
+                        time.sleep(1)
+            except requests.exceptions.RequestException as e:
+                print(f"Network or API error checking status: {e}. Retrying after a short delay...")
+                time.sleep(60) 
+            except Exception as e:
+                print(f"An unexpected error occurred during API report fetching: {e}. Exiting.")
+                return
+    
+    if not qualys_report_filepath:
+        print("❌ No Qualys report file available (either not provided or API fetch failed). Exiting.")
         return
 
-    print(f"📋 Using Report ID: {report_id}, Title: {report_title}")
-
-    while True:
-        try:
-            status = check_status(report_id)
-            print(f"🔄 Report status for ID {report_id}: {status}")
-            if status.lower() == "finished":
-                file_path = download_report(report_id, report_title)
-                break
-            elif status.lower() == "error":
-                print(f"❌ Report ID {report_id} is in ERROR state. Cannot proceed.")
-                return
-            else: 
-                wait_duration = 600  
-                wait_duration_int = int(wait_duration) 
-                print(f"⏱ Report not finished. Will retry in {wait_duration_int // 60} minutes.")
-                for _ in tqdm(range(wait_duration_int), desc="Waiting for Qualys report", unit="s", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]"):
-                    time.sleep(1)
-        except requests.exceptions.RequestException as e:
-            print(f"Network or API error checking status: {e}. Retrying after a short delay...")
-            time.sleep(60) 
-        except Exception as e:
-            print(f"An unexpected error occurred: {e}. Exiting.")
-            return
-
-    match_findings(nessus_file, nessus_sheet, file_path)
+    # Call match_findings with the determined Qualys report path and Nessus inputs
+    match_findings(nessus_file_path_input, nessus_sheet_name_input, qualys_report_filepath)
 
 if __name__ == "__main__":
     main()
