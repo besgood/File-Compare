@@ -10,6 +10,7 @@ from getpass import getpass
 from requests.auth import HTTPBasicAuth
 from tqdm.auto import tqdm # Added for progress bars
 import gc # Import garbage collector
+import re # For extracting port from results string
 
 # Initialize tqdm for pandas
 tqdm.pandas()
@@ -199,6 +200,18 @@ def write_dataframe_to_excel_chunks(writer, df, sheet_name, main_writer_status, 
         with pd.ExcelWriter(output_filename_part, engine='openpyxl') as chunk_writer:
             chunk_df.to_excel(chunk_writer, sheet_name=sheet_name, index=False)
 
+# === Helper function to extract port from results string ===
+def extract_port_from_results(results_text):
+    if pd.isna(results_text):
+        return None
+    # Regex to find common port patterns: "port 22", "on port 8080", "port 443/tcp"
+    # It looks for a number (port) that might be preceded by "port " or "on port "
+    # and might be followed by "/" and protocol letters.
+    match = re.search(r'(?:port\s+|on port\s+)(\d+)(?:\s*/\s*[a-zA-Z]*)?', str(results_text), re.IGNORECASE)
+    if match:
+        return match.group(1) # Return the first capturing group (the port number)
+    return None
+
 
 # === Match Nessus and Qualys Data ===
 def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath): 
@@ -207,7 +220,6 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         nessus_orig = pd.read_excel(nessus_file, sheet_name=nessus_sheet)
         print(f"🔄 Reading Qualys CSV file from: {qualys_csv_filepath}")
         try:
-            # --- USER CONFIRMED: skiprows=4 is correct for their Qualys CSV ---
             qualys_orig = pd.read_csv(qualys_csv_filepath, skiprows=4, low_memory=False) 
         except pd.errors.EmptyDataError:
             print(f"⚠️ Qualys file '{qualys_csv_filepath}' is empty or unreadable after skipping rows. Cannot proceed with matching.")
@@ -230,7 +242,6 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         nessus.columns = [str(col).strip() for col in nessus.columns] 
         qualys.columns = [str(col).strip() for col in qualys.columns]
 
-        # --- DIAGNOSTIC PRINT (NOW UNCOMMENTED BY DEFAULT) ---
         print("\n--- Nessus DataFrame Head (after strip): ---")
         print(nessus.head())
         print("\n--- Qualys DataFrame Head (after strip): ---")
@@ -240,28 +251,46 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         print("-" * 50)
 
         print("🔄 Standardizing column names for Nessus...")
-        # User confirmed Nessus headers: UniqueID, IP, Port, Reported Finding, CVE
-        nessus = nessus.rename(columns={
-            # "Reported Finding": "Reported Finding", # Already correct if header is "Reported Finding"
-            # "IP Address": "IP", # User confirmed header is "IP"
-            # "Port": "Port", # Already correct
-            "CVE": "CVEs", # User confirmed header is "CVE"
-            # "Unique ID": "UniqueID" # Already correct
-        })
+        nessus = nessus.rename(columns={"CVE": "CVEs"})
         print("🔄 Standardizing column names for Qualys...")
-        # User confirmed Qualys headers: IP, Port, CVE ID, Vuln Status, QID
-        qualys = qualys.rename(columns={
-            # "IP": "IP", # Already correct
-            # "Port": "Port", # Already correct
-            # "QID": "QID", # Already correct
-            "CVE ID": "CVEs", # User confirmed header is "CVE ID"
-            # "Vulnerability State": "Vuln Status" # Already correct
-        })
+        qualys = qualys.rename(columns={"CVE ID": "CVEs"})
+        
+        # --- MODIFICATION: Attempt to extract port from Qualys "Results" if "Port" is missing ---
+        if "Port" not in qualys.columns: # If Port column doesn't exist at all
+            qualys["Port"] = pd.NA # Create it with NAs
+        
+        # Ensure 'Results' column exists in Qualys for port extraction
+        if "Results" in qualys.columns:
+            print("🔄 Checking Qualys 'Port' column and attempting to extract from 'Results' if missing...")
+            # Identify rows where Port is NaN, empty string, '0', or '-' (common placeholders for no port)
+            # Convert Port to string first to handle mixed types before checking for empty strings or placeholders
+            qualys["Port"] = qualys["Port"].fillna('').astype(str).str.strip()
+            missing_port_mask = qualys["Port"].isin(['', '0', '-']) | pd.isna(qualys["Port"]) # pd.isna for good measure
 
-        # --- DIAGNOSTIC PRINT (NOW UNCOMMENTED BY DEFAULT) ---
+            if missing_port_mask.any():
+                print(f"   Found {missing_port_mask.sum()} Qualys rows with missing/placeholder Port. Attempting extraction from 'Results'.")
+                # Apply extraction function only to rows where port is missing
+                # .loc is important to ensure we are modifying the original DataFrame slice
+                qualys.loc[missing_port_mask, 'Port_from_Results'] = qualys.loc[missing_port_mask, 'Results'].apply(extract_port_from_results)
+                
+                # Update the 'Port' column with extracted ports where available
+                qualys.loc[missing_port_mask, 'Port'] = qualys.loc[missing_port_mask, 'Port_from_Results'].fillna(qualys.loc[missing_port_mask, 'Port'])
+                qualys.drop(columns=['Port_from_Results'], inplace=True, errors='ignore') # Clean up helper column
+                
+                # --- DIAGNOSTIC PRINT (Uncomment to see effect of port extraction) ---
+                # print("\n--- Qualys DataFrame Head (after port extraction attempt from Results): ---")
+                # print(qualys[['IP', 'Port', 'Results']].head(10)) # Show more rows to see variety
+                # print("-" * 50)
+            else:
+                print("   Qualys 'Port' column seems populated. No extraction from 'Results' needed based on initial check.")
+        else:
+            print("⚠️ Qualys DataFrame missing 'Results' column. Cannot attempt port extraction from it.")
+        # --- END OF PORT EXTRACTION MODIFICATION ---
+
+
         print("\n--- Nessus DataFrame Head (after rename): ---")
         print(nessus.head())
-        print("\n--- Qualys DataFrame Head (after rename): ---")
+        print("\n--- Qualys DataFrame Head (after rename and potential port extraction): ---")
         print(qualys.head())
         print("-" * 50)
 
@@ -285,13 +314,11 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
             for col in ["IP", "Port", "CVEs"]:
                 if col in df_obj.columns:
                     df_obj[col] = df_obj[col].fillna('').astype(str).str.strip()
-                    # Optional: Convert CVEs to uppercase for consistent matching if case varies
-                    if col == "CVEs":
+                    if col == "CVEs": # Uppercase CVEs for consistency
                         df_obj[col] = df_obj[col].str.upper()
                 else:
                     print(f"⚠️ Warning: Column '{col}' not found in {df_name} DataFrame during normalization.")
         
-        # --- DIAGNOSTIC PRINT (NOW UNCOMMENTED BY DEFAULT) ---
         print("\n--- Nessus Data (first 5, IP, Port, CVEs after normalization): ---")
         if not nessus.empty: print(nessus[['IP', 'Port', 'CVEs']].head())
         print("\n--- Qualys Data (first 5, IP, Port, CVEs after normalization): ---")
@@ -310,14 +337,13 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         qualys = qualys.explode("CVEs")
         gc.collect() 
 
-        nessus["CVEs"] = nessus["CVEs"].str.strip().str.upper() # Strip and uppercase after explode
-        qualys["CVEs"] = qualys["CVEs"].str.strip().str.upper() # Strip and uppercase after explode
+        nessus["CVEs"] = nessus["CVEs"].str.strip().str.upper() 
+        qualys["CVEs"] = qualys["CVEs"].str.strip().str.upper() 
         
         print("🔄 Creating merge keys...")
         nessus["key"] = nessus["IP"] + ":" + nessus["Port"] + ":" + nessus["CVEs"]
         qualys["key"] = qualys["IP"] + ":" + qualys["Port"] + ":" + qualys["CVEs"]
 
-        # --- DIAGNOSTIC PRINT (NOW UNCOMMENTED BY DEFAULT) ---
         print("\n--- Sample Nessus Keys (first 10 after all processing): ---")
         if not nessus.empty: print(nessus["key"].head(10).tolist())
         print("\n--- Sample Qualys Keys (first 10 after all processing): ---")
@@ -325,10 +351,8 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         print("-" * 50)
 
         qualys_keys = set(qualys["key"])
-        # --- DIAGNOSTIC PRINT (NOW UNCOMMENTED BY DEFAULT) ---
         print(f"\nNumber of unique Qualys keys: {len(qualys_keys)}")
         if qualys_keys:
-            # Convert set to list for slicing, then print
             print(f"First few Qualys keys in set: {list(qualys_keys)[:10]}")
         print("-" * 50)
         
