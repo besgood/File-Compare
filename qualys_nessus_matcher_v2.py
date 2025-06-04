@@ -437,15 +437,19 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         print(f"❌ An unexpected error occurred during data processing: {e}")
         return
 
-    out_path_base_name = "nessus_vs_qualys_results"
-    out_path_base_dir = os.path.join(REPORTS_DIR, out_path_base_name)
+    # --- Excel Writing with Splitting (Sequential) ---
+    # Get current timestamp for filename
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path_base_name = f"nessus_vs_qualys_results_{timestamp_str}" # Add timestamp here
+    
+    out_path_base_dir = os.path.join(REPORTS_DIR, out_path_base_name) # This is now base_name + timestamp
     out_ext = ".xlsx"
 
     file_part_counter = [0]  
     main_excel_writer = None
     main_writer_status = {'closed': True, 'path': None} 
     
-    initial_output_filename = f"{out_path_base_dir}{out_ext}"
+    initial_output_filename = f"{out_path_base_dir}{out_ext}" # Filename now includes timestamp
     if not match_summary.empty and len(match_summary) > MAX_ROWS_PER_FILE:
         file_part_counter[0] = 1 
         # Corrected variable name for part counter in filename
@@ -465,7 +469,7 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
     tqdm.write("Writing 'Match Summary' to Excel...")
     write_dataframe_to_excel_chunks(
         main_excel_writer, match_summary, "Match Summary",
-        main_writer_status, file_part_counter, out_path_base_dir, out_ext
+        main_writer_status, file_part_counter, out_path_base_dir, out_ext # Pass out_path_base_dir which includes timestamp
     )
     del match_summary 
     gc.collect()
@@ -486,7 +490,8 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
     elif file_part_counter[0] == 1 and initial_output_filename.endswith(f"_part1{out_ext}"):
         print(f"Output written to: {initial_output_filename}")
     else:
-        print(f"Output potentially split into multiple files starting with '{out_path_base_name}'.")
+        # Use out_path_base_name which includes the timestamp for the print message
+        print(f"Output potentially split into multiple files starting with '{out_path_base_name}'.") 
         print(f"Check files from '{out_path_base_dir}{out_ext}' (if first sheet was small) or '{out_path_base_dir}_part1{out_ext}' up to '_part{file_part_counter[0]}{out_ext}'.")
 
 
