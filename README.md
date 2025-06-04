@@ -39,7 +39,7 @@ This script automates the process of generating a Qualys vulnerability report, d
 Install dependencies with:
 
 ```bash
-pip install pandas openpyxl requests
+pip install pandas openpyxl requests tqdm
 ```
 
 ## Notes
