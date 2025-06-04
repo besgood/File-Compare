@@ -204,12 +204,9 @@ def write_dataframe_to_excel_chunks(writer, df, sheet_name, main_writer_status, 
 def extract_port_from_results(results_text):
     if pd.isna(results_text):
         return None
-    # Regex to find common port patterns: "port 22", "on port 8080", "port 443/tcp"
-    # It looks for a number (port) that might be preceded by "port " or "on port "
-    # and might be followed by "/" and protocol letters.
     match = re.search(r'(?:port\s+|on port\s+)(\d+)(?:\s*/\s*[a-zA-Z]*)?', str(results_text), re.IGNORECASE)
     if match:
-        return match.group(1) # Return the first capturing group (the port number)
+        return match.group(1) 
     return None
 
 
@@ -242,39 +239,28 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         nessus.columns = [str(col).strip() for col in nessus.columns] 
         qualys.columns = [str(col).strip() for col in qualys.columns]
 
-        # --- DIAGNOSTIC PRINT (Uncomment to use for detailed debugging) ---
-        # print("\n--- Nessus DataFrame Head (after strip): ---")
-        # print(nessus.head())
-        # print("\n--- Qualys DataFrame Head (after strip): ---")
-        # print(qualys.head())
-        # print("\n--- Qualys DataFrame Columns (after strip): ---")
-        # print(qualys.columns.tolist())
-        # print("-" * 50)
-
         print("🔄 Standardizing column names for Nessus...")
-        nessus = nessus.rename(columns={"CVE": "CVEs"}) # Nessus: CVE -> CVEs
+        nessus = nessus.rename(columns={"CVE": "CVEs"}) 
         
         print("🔄 Standardizing column names for Qualys...")
-        qualys_rename_map = {"CVE ID": "CVEs"} # Qualys: CVE ID -> CVEs
-        # Add Title and Results to rename map if they exist, prefixing them for clarity
+        qualys_rename_map = {"CVE ID": "CVEs"} 
         if "Title" in qualys.columns:
             qualys_rename_map["Title"] = "Qualys_Title"
         else:
             print("⚠️ Qualys data missing 'Title' column. It will be blank in the summary.")
-            qualys["Qualys_Title"] = "" # Create empty column if missing
+            qualys["Qualys_Title"] = "" 
         
         if "Results" in qualys.columns:
             qualys_rename_map["Results"] = "Qualys_Results"
         else:
             print("⚠️ Qualys data missing 'Results' column. It will be blank in the summary.")
-            qualys["Qualys_Results"] = "" # Create empty column if missing
+            qualys["Qualys_Results"] = "" 
         
         qualys = qualys.rename(columns=qualys_rename_map)
         
         if "Port" not in qualys.columns: 
             qualys["Port"] = pd.NA 
         
-        # Use "Qualys_Results" for port extraction if "Results" was present
         results_col_for_port_extraction = "Qualys_Results" if "Qualys_Results" in qualys.columns else None
 
         if results_col_for_port_extraction:
@@ -292,19 +278,8 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         else:
             print("⚠️ Qualys DataFrame missing 'Qualys_Results' column (originally 'Results'). Cannot attempt port extraction from it.")
 
-
-        # --- DIAGNOSTIC PRINT (Uncomment to use for detailed debugging) ---
-        # print("\n--- Nessus DataFrame Head (after rename): ---")
-        # print(nessus.head())
-        # print("\n--- Qualys DataFrame Head (after rename and potential port extraction): ---")
-        # print(qualys.head())
-        # print("-" * 50)
-
-
         required_nessus_cols = ["IP", "Port", "CVEs", "UniqueID", "Reported Finding"]
-        # "Qualys_Title" and "Qualys_Results" are now guaranteed to exist (even if empty)
         required_qualys_cols = ["IP", "Port", "CVEs", "QID", "Vuln Status", "Qualys_Title", "Qualys_Results"]
-
 
         for col in required_nessus_cols:
             if col not in nessus.columns:
@@ -319,7 +294,7 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
 
         print("🔄 Normalizing data types and stripping whitespace for key components...")
         for df_name, df_obj in [("Nessus", nessus), ("Qualys", qualys)]:
-            for col in ["IP", "Port", "CVEs"]: # Qualys_Title and Qualys_Results are handled separately if needed for key
+            for col in ["IP", "Port", "CVEs"]: 
                 if col in df_obj.columns:
                     df_obj[col] = df_obj[col].fillna('').astype(str).str.strip()
                     if col == "Port":
@@ -337,14 +312,6 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
                 else:
                     print(f"⚠️ Warning: Column '{col}' not found in {df_name} DataFrame during normalization.")
         
-        # --- DIAGNOSTIC PRINT (Uncomment to use for detailed debugging) ---
-        # print("\n--- Nessus Data (first 5, IP, Port, CVEs after normalization): ---")
-        # if not nessus.empty: print(nessus[['IP', 'Port', 'CVEs']].head())
-        # print("\n--- Qualys Data (first 5, IP, Port, CVEs after normalization): ---")
-        # if not qualys.empty: print(qualys[['IP', 'Port', 'CVEs']].head())
-        # print("-" * 50)
-
-
         print("🔄 Processing CVEs (splitting and exploding)...")
         nessus["CVEs"] = nessus["CVEs"].str.split(",")
         qualys["CVEs"] = qualys["CVEs"].str.split(",")
@@ -363,19 +330,7 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         nessus["key"] = nessus["IP"] + ":" + nessus["Port"] + ":" + nessus["CVEs"]
         qualys["key"] = qualys["IP"] + ":" + qualys["Port"] + ":" + qualys["CVEs"]
 
-        # --- DIAGNOSTIC PRINT (Uncomment to use for detailed debugging) ---
-        # print("\n--- Sample Nessus Keys (first 10 after all processing): ---")
-        # if not nessus.empty: print(nessus["key"].head(10).tolist())
-        # print("\n--- Sample Qualys Keys (first 10 after all processing): ---")
-        # if not qualys.empty: print(qualys["key"].head(10).tolist())
-        # print("-" * 50)
-
         qualys_keys = set(qualys["key"])
-        # --- DIAGNOSTIC PRINT (Uncomment to use for detailed debugging) ---
-        # print(f"\nNumber of unique Qualys keys: {len(qualys_keys)}")
-        # if qualys_keys:
-        #     print(f"First few Qualys keys in set: {list(qualys_keys)[:10]}")
-        # print("-" * 50)
         
         print("🔄 Applying match logic to Nessus data...")
         nessus["Match"] = nessus["key"].progress_apply(lambda k: "Match" if k in qualys_keys else "No Match")
@@ -384,7 +339,7 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         print("\n--- Match Counts in Nessus Data (after .progress_apply): ---")
         print(match_counts_after_apply)
         if "Match" not in match_counts_after_apply or match_counts_after_apply.get("Match", 0) == 0: 
-            print("⚠️ WARNING: Zero matches found after applying logic. Please carefully review the printed sample keys and data transformations.")
+            print("⚠️ WARNING: Zero matches found after applying logic. Please carefully review data transformations.")
         print("-" * 50)
 
         del qualys_keys 
@@ -392,7 +347,6 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
 
         print("🔄 Generating match summary...")
         nessus_for_merge = nessus[["key", "UniqueID", "IP", "Port", "Reported Finding", "CVEs", "Match"]].copy()
-        # Ensure Qualys_Title and Qualys_Results are included for the merge
         qualys_cols_for_merge = ["key", "QID", "Vuln Status", "Qualys_Title", "Qualys_Results"]
         qualys_for_merge = qualys[qualys_cols_for_merge].drop_duplicates(subset=['key']).copy() 
 
@@ -408,12 +362,11 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
             .agg(
                 Match_Status=('Match', 'first'), 
                 Match_Key=('key', 'first'),
-                Qualys_Title_Agg=('Qualys_Title', 'first'), # Aggregate Qualys_Title
-                Qualys_Results_Agg=('Qualys_Results', 'first') # Aggregate Qualys_Results
+                Qualys_Title_Agg=('Qualys_Title', 'first'), 
+                Qualys_Results_Agg=('Qualys_Results', 'first') 
             )
             .reset_index()
         )
-        # Rename aggregated columns for final output
         match_summary.rename(columns={
             'Match_Status': 'Match', 
             'Match_Key': 'Key Used for Match',
@@ -437,22 +390,19 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
         print(f"❌ An unexpected error occurred during data processing: {e}")
         return
 
-    # --- Excel Writing with Splitting (Sequential) ---
-    # Get current timestamp for filename
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path_base_name = f"nessus_vs_qualys_results_{timestamp_str}" # Add timestamp here
+    out_path_base_name = f"nessus_vs_qualys_results_{timestamp_str}" 
     
-    out_path_base_dir = os.path.join(REPORTS_DIR, out_path_base_name) # This is now base_name + timestamp
+    out_path_base_dir = os.path.join(REPORTS_DIR, out_path_base_name) 
     out_ext = ".xlsx"
 
     file_part_counter = [0]  
     main_excel_writer = None
     main_writer_status = {'closed': True, 'path': None} 
     
-    initial_output_filename = f"{out_path_base_dir}{out_ext}" # Filename now includes timestamp
+    initial_output_filename = f"{out_path_base_dir}{out_ext}" 
     if not match_summary.empty and len(match_summary) > MAX_ROWS_PER_FILE:
         file_part_counter[0] = 1 
-        # Corrected variable name for part counter in filename
         initial_output_filename = f"{out_path_base_dir}_part{file_part_counter[0]}{out_ext}" 
         tqdm.write(f"First sheet ('Match Summary') is large. Initial output file will be: {initial_output_filename}")
 
@@ -469,7 +419,7 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
     tqdm.write("Writing 'Match Summary' to Excel...")
     write_dataframe_to_excel_chunks(
         main_excel_writer, match_summary, "Match Summary",
-        main_writer_status, file_part_counter, out_path_base_dir, out_ext # Pass out_path_base_dir which includes timestamp
+        main_writer_status, file_part_counter, out_path_base_dir, out_ext 
     )
     del match_summary 
     gc.collect()
@@ -490,7 +440,6 @@ def match_findings(nessus_file, nessus_sheet, qualys_csv_filepath):
     elif file_part_counter[0] == 1 and initial_output_filename.endswith(f"_part1{out_ext}"):
         print(f"Output written to: {initial_output_filename}")
     else:
-        # Use out_path_base_name which includes the timestamp for the print message
         print(f"Output potentially split into multiple files starting with '{out_path_base_name}'.") 
         print(f"Check files from '{out_path_base_dir}{out_ext}' (if first sheet was small) or '{out_path_base_dir}_part1{out_ext}' up to '_part{file_part_counter[0]}{out_ext}'.")
 
